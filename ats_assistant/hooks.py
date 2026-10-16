@@ -304,3 +304,16 @@ require_type_annotated_api_methods = True
 # List of apps whose translatable strings should be excluded from this app's translations.
 # ignore_translatable_strings_from = []
 
+
+# ATS Assistant chat widget on every desk page
+app_include_js = "/assets/ats_assistant/js/ats_assistant.js"
+app_include_css = "/assets/ats_assistant/css/ats_assistant.css"
+
+# Create the "AI Assistant User" role on install / migrate
+after_install = "ats_assistant.assistant.setup.ensure_role"
+after_migrate = ["ats_assistant.assistant.setup.ensure_role"]
+
+# Delete old ATS AI Log entries every day (ats_ai_log_days, default 90)
+scheduler_events = {
+    "daily": ["ats_assistant.assistant.audit.clear_old_logs"],
+}
