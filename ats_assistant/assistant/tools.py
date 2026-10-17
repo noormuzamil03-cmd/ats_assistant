@@ -62,8 +62,8 @@ def _allow_sensitive():
 
 
 def _allow_salary():
-    return _allow_sensitive() or bool(frappe.conf.get("ats_ai_allow_salary"))
-
+    # Salary / payroll is open by default; close it with: bench --site SITE set-config ats_ai_allow_salary 0
+    return _allow_sensitive() or str(frappe.conf.get("ats_ai_allow_salary", 1)) != "0"
 
 def _blocked(doctype):
     doctype = cstr(doctype).strip()
