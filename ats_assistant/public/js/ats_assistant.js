@@ -582,17 +582,7 @@
 			if (!chat.length) {
 				const w = document.createElement("div");
 				w.className = "ats-ai-welcome";
-				w.innerHTML = "<b>Hi " + esc((frappe.session.user_fullname || "").split(" ")[0] || "there") +
-					"!</b><span>Ask about attendance, employees, leaves, work orders, reports — in English or Roman Urdu.</span>";
-				const chips = document.createElement("div");
-				chips.className = "ats-ai-chips";
-				SUGGESTIONS.forEach((q) => {
-					const b = document.createElement("button");
-					b.textContent = q;
-					b.addEventListener("click", () => ask(q));
-					chips.appendChild(b);
-				});
-				w.appendChild(chips);
+				w.innerHTML = "<b>Hi " + esc((frappe.session.user_fullname || "").split(" ")[0] || "there") + "!</b>";
 				body.appendChild(w);
 			}
 			chat.forEach((c) => bubble(c.role, c.content, "", { datasets: c.datasets }));
