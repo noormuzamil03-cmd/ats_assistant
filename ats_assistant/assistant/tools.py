@@ -6,6 +6,7 @@ assistant can see. Nothing here writes to the database.
 """
 
 import json
+from datetime import timedelta
 import os
 import re
 
@@ -884,6 +885,144 @@ def leave_balance(employee, leave_type=None, date=None):
                       "note": "" if out else "No leave allocation found for this date."})
 
 
+def missing_checkout(date=None, from_date=None, to_date=None, department=None, branch=None, employee=None):
+    """Employees who punched IN but have no check-out (OUT) for a day or a date range (max 31 days)."""
+    if not _readable("Employee") or not _readable("Employee Checkin"):
+        raise ToolError("You do not have permission to read check-ins.")
+    today = getdate(nowdate())
+    if from_date or to_date:
+        start = getdate(from_date or to_date)
+        end = getdate(to_date or from_date)
+    else:
+        start = end = getdate(date) if date else today
+    if start > end:
+        start, end = end, start
+    end = min(end, today)
+    if (end - start).days > 30:
+        raise ToolError("Please ask for 31 days or less.")
+
+    # which employees
+    filters = {}
+    resolved = {}
+    for field, doctype, value in (("department", "Department", department), ("branch", "Branch", branch)):
+        if value:
+            names = _resolve_names(doctype, value)
+            if not names:
+                raise ToolError(f"No {doctype} matches '{value}'.")
+            filters[field] = ["in", names]
+            resolved[field] = names
+    if employee:
+        emp_id = cstr(employee).strip()
+        if not frappe.db.exists("Employee", emp_id):
+            found = search_records(emp_id, doctype="Employee", limit=5).get("matches") or []
+            if len(found) != 1:
+                return {"error": "Please say which employee exactly.", "candidates": found}
+            emp_id = found[0]["name"]
+        filters["name"] = emp_id
+        resolved["employee"] = emp_id
+    meta = frappe.get_meta("Employee")
+    fields = ["name", "employee_name"] + _existing_fields(meta, ["department", "default_shift"])
+    emps = {e.name: e for e in frappe.get_list("Employee", filters=filters, fields=fields, limit_page_length=MAX_SCAN)}
+    if not emps:
+        return {"from_date": str(start), "to_date": str(end), "matched": resolved, "missing_checkout": 0}
+
+    # punches: from the evening before the first day (night shifts) to the next noon after the last day
+    c_meta = frappe.get_meta("Employee Checkin")
+    c_fields = ["employee", "time", "log_type"] + _existing_fields(c_meta, ["shift"])
+    c_filters = {"time": ["between", [f"{add_days(start, -1)} 12:00:00", f"{add_days(end, 1)} 14:00:00"]]}
+    if filters:
+        c_filters["employee"] = ["in", list(emps)]
+    punches = {}
+    for c in frappe.get_list("Employee Checkin", filters=c_filters, fields=c_fields,
+                             order_by="time asc", limit_page_length=MAX_SCAN * 3):
+        if c.employee in emps:
+            punches.setdefault(c.employee, []).append(c)
+
+    shifts = {}
+
+    def shift_times(name):
+        if not name:
+            return None
+        if name not in shifts:
+            row = frappe.db.get_value("Shift Type", name, ["start_time", "end_time"], as_dict=True) or {}
+            s, e = _seconds(row.get("start_time")), _seconds(row.get("end_time"))
+            shifts[name] = None if s is None or e is None else (s, e)
+        return shifts[name]
+
+    now = get_datetime(frappe.utils.now_datetime())
+    rows, still_on_duty = [], 0
+    for emp, plist in punches.items():
+        info = emps[emp]
+        day = start
+        while day <= end:
+            base = get_datetime(f"{day} 00:00:00")
+            shift = next((p.get("shift") for p in plist if p.get("shift") and getdate(p.time) == day), None) \
+                or info.get("default_shift")
+            st = shift_times(shift)
+            night = bool(st and st[1] <= st[0])
+            if night:  # e.g. 20:00 -> 08:00: the check-out is on the next morning
+                w_start = base + timedelta(seconds=st[0] - 3 * 3600)
+                w_end = base + timedelta(days=1, seconds=st[1] + 5 * 3600)
+                shift_end = base + timedelta(days=1, seconds=st[1])
+            else:
+                w_start = base
+                w_end = base + timedelta(days=1)
+                shift_end = base + timedelta(seconds=st[1]) if st else \
+                    base + timedelta(hours=20)
+            day_p = [p for p in plist if w_start <= get_datetime(p.time) < w_end]
+            day_after = add_days(day, 1)
+            if day_p:
+                # punches within 10 minutes of each other are one punch (double tap on the machine)
+                distinct = [day_p[0]]
+                for p in day_p[1:]:
+                    if (get_datetime(p.time) - get_datetime(distinct[-1].time)).total_seconds() > 600:
+                        distinct.append(p)
+                typed = [p for p in day_p if p.log_type in ("IN", "OUT")]
+                if typed:
+                    missing = typed[-1].log_type == "IN"
+                else:
+                    missing = len(distinct) == 1
+                if missing and now < shift_end + timedelta(minutes=30):
+                    still_on_duty += 1  # the duty is not over yet: not missing (yet)
+                elif missing:
+                    first_in = next((p for p in day_p if p.log_type == "IN"), day_p[0])
+                    rows.append({"Employee": emp, "Name": info.get("employee_name"),
+                                 "Department": info.get("department"), "Date": str(day),
+                                 "Check In": _hhmm(first_in.time), "Last Punch": _hhmm(day_p[-1].time),
+                                 "Punches": len(distinct), "Shift": shift or ""})
+            day = day_after
+
+    rows.sort(key=lambda r: (r["Date"], cstr(r["Department"]), cstr(r["Name"])))
+    result = {"from_date": str(start), "to_date": str(end), "matched": resolved,
+              "missing_checkout": len(rows), "employees": len({r["Employee"] for r in rows})}
+    if still_on_duty:
+        result["still_on_duty_not_counted"] = still_on_duty
+    by_dept = {}
+    for r in rows:
+        k = cstr(r["Department"]) or "(not set)"
+        by_dept[k] = by_dept.get(k, 0) + 1
+    if by_dept:
+        result["by_department"] = dict(sorted(by_dept.items(), key=lambda x: -x[1])[:30])
+    if start != end:
+        per_emp = {}
+        for r in rows:
+            g = per_emp.setdefault(r["Employee"], {"Employee": r["Employee"], "Name": r["Name"],
+                                                   "Department": r["Department"], "Days": 0})
+            g["Days"] += 1
+        top = sorted(per_emp.values(), key=lambda x: -x["Days"])
+        result["most_often"] = top[:10]
+        offer(f"Missing check-out by employee {start} to {end}", top)
+    title = f"Missing check-out {start}" + ("" if start == end else f" to {end}")
+    offer(title, rows)
+    result["list"] = [{k: r[k] for k in ("Employee", "Name", "Department", "Date", "Check In")} for r in rows[:25]]
+    if len(rows) > 25:
+        result["note"] = f"showing 25 of {len(rows)}; the full list is under the answer (View all)"
+    result["rule"] = ("missing check-out = the employee punched in but there is no OUT punch after the last IN "
+                      "(machines without IN/OUT: only one punch that day). Night shifts are checked up to the "
+                      "next morning. Today's employees whose shift has not ended yet are not counted.")
+    return _jsonable(result)
+
+
 # ---------------- registry ----------------
 
 FUNCTIONS = {
@@ -902,6 +1041,7 @@ FUNCTIONS = {
     "web_lookup": web_lookup,
     "attendance_summary": attendance_summary,
     "leave_balance": leave_balance,
+    "missing_checkout": missing_checkout,
 }
 
 _FILTERS_SCHEMA = {
@@ -995,6 +1135,17 @@ SCHEMAS = [
          "leave_type": {"type": "string"},
          "date": {"type": "string", "description": "YYYY-MM-DD, default today"}},
          "required": ["employee"]}},
+    {"name": "missing_checkout",
+     "description": "Employees who checked IN but did NOT check out (missing OUT punch / sirf in punch / checkout "
+                    "nahi kiya) for one day or a date range (max 31 days), with department-wise counts and, for "
+                    "a range, who misses most often. Use it for every missing checkout / missing punch question.",
+     "parameters": {"type": "object", "properties": {
+         "date": {"type": "string", "description": "YYYY-MM-DD, one day (default today)"},
+         "from_date": {"type": "string", "description": "YYYY-MM-DD, start of a range"},
+         "to_date": {"type": "string", "description": "YYYY-MM-DD, end of a range"},
+         "department": {"type": "string"},
+         "branch": {"type": "string"},
+         "employee": {"type": "string", "description": "employee ID or name"}}}},
     {"name": "web_lookup",
      "description": "Look up GENERAL knowledge on Wikipedia: current presidents / prime ministers / office "
                     "holders, countries, cities, famous people, definitions, history. Use it for every "

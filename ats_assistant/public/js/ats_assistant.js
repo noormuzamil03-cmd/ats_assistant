@@ -457,6 +457,44 @@
 		return wrap.children.length ? wrap : null;
 	}
 
+	// ---------------------------------------------------------------- page context
+	// What the user has open (a record, a list or a report), so "iski attendance" needs no ID.
+	const muted = {};
+	function route_key() {
+		try { return (frappe.get_route() || []).join("/"); } catch (e) { return ""; }
+	}
+	function page_context() {
+		let route = [];
+		try { route = frappe.get_route() || []; } catch (e) { return null; }
+		if (muted[route.join("/")]) return null;
+		try {
+			if (route[0] === "Form" && window.cur_frm && cur_frm.doctype === route[1] && cur_frm.doc
+				&& !cur_frm.is_new() && cur_frm.doctype !== "ATS AI Log") {
+				const d = cur_frm.doc;
+				const tf = cur_frm.meta && cur_frm.meta.title_field;
+				const title = (tf && d[tf]) || d.employee_name || d.title || d.item_name || d.customer_name
+					|| d.supplier_name || d.machine_name || "";
+				return { type: "form", doctype: cur_frm.doctype, name: d.name, title: String(title || "").slice(0, 140),
+					label: "📄 " + __(cur_frm.doctype) + ": " + (title && title !== d.name ? title + " (" + d.name + ")" : d.name) };
+			}
+			if (route[0] === "List" && window.cur_list && cur_list.doctype === route[1]) {
+				let filters = [];
+				try { filters = cur_list.get_filters_for_args ? cur_list.get_filters_for_args() : cur_list.filters || []; } catch (e) { filters = []; }
+				filters = (filters || []).filter((f) => Array.isArray(f)).slice(0, 10);
+				return { type: "list", doctype: cur_list.doctype, filters: filters,
+					label: "📋 " + __(cur_list.doctype) + " list" + (filters.length ? " (" + filters.length + " filter" + (filters.length > 1 ? "s" : "") + ")" : "") };
+			}
+			if (route[0] === "query-report" && frappe.query_report && frappe.query_report.report_name === route[1]) {
+				let filters = {};
+				try { filters = frappe.query_report.get_filter_values(false) || {}; } catch (e) { filters = {}; }
+				return { type: "report", report: route[1], filters: filters, label: "📊 " + __(route[1]) };
+			}
+		} catch (e) {
+			return null;
+		}
+		return null;
+	}
+
 	// ---------------------------------------------------------------- widget
 	function build() {
 		if (!allowed()) return;
@@ -473,6 +511,8 @@
 			'<div><button class="ats-ai-max" title="Bigger window">⤢</button><button class="ats-ai-voice" title="Read answers aloud (on/off)"></button>' +
 			'<button class="ats-ai-clear" title="Clear chat">Clear</button><button class="ats-ai-close" title="Close">&times;</button></div></div>' +
 			'<div class="ats-ai-body"></div>' +
+			'<div class="ats-ai-ctx" title="The assistant knows this page: ask e.g. &quot;iski attendance&quot;"><span></span>' +
+			'<button title="Do not use this page">&times;</button></div>' +
 			'<div class="ats-ai-foot">' +
 			'<button class="ats-ai-mic" title="Ask by voice">' + ICON.mic + "</button>" +
 			'<textarea rows="1" placeholder="Ask anything or tap the mic…"></textarea>' +
@@ -487,6 +527,23 @@
 		const mic_btn = panel.querySelector(".ats-ai-mic");
 		const voice_btn = panel.querySelector(".ats-ai-voice");
 		const placeholder = input.placeholder;
+		const ctx_bar = panel.querySelector(".ats-ai-ctx");
+		function paint_ctx() {
+			const c = page_context();
+			ctx_bar.classList.toggle("show", !!c);
+			ctx_bar.querySelector("span").textContent = c ? c.label : "";
+			return c;
+		}
+		ctx_bar.querySelector("button").addEventListener("click", () => {
+			muted[route_key()] = 1;
+			paint_ctx();
+		});
+		const repaint_ctx = () => {
+			if (!panel.classList.contains("open")) return;
+			[300, 1200].forEach((t) => setTimeout(paint_ctx, t));
+		};
+		if (frappe.router && frappe.router.on) frappe.router.on("change", repaint_ctx);
+		$(document).on("form-refresh", repaint_ctx);
 		let chat = load();
 		let busy = false;
 		let current = {};
@@ -600,9 +657,10 @@
 			const history = chat.slice(-8).map((c) => ({ role: c.role, content: c.content }));
 			const welcome = body.querySelector(".ats-ai-welcome");
 			if (welcome) welcome.remove();
+			const ctx = paint_ctx();
 			chat.push({ role: "user", content: q });
 			save(chat);
-			bubble("user", q, via_voice ? "🎤" : "");
+			bubble("user", q, (via_voice ? "🎤 " : "") + (ctx ? ctx.label : ""));
 			const wait = document.createElement("div");
 			wait.className = "ats-ai-msg bot ats-ai-wait";
 			wait.innerHTML = "<p>…</p>";
@@ -618,7 +676,11 @@
 
 			frappe.call({
 				method: API,
-				args: { question: q, history: JSON.stringify(history), voice: via_voice ? 1 : 0, rid: rid },
+				args: {
+					question: q, history: JSON.stringify(history), voice: via_voice ? 1 : 0, rid: rid,
+					context: ctx ? JSON.stringify({ type: ctx.type, doctype: ctx.doctype, name: ctx.name, title: ctx.title,
+						filters: ctx.filters, report: ctx.report }) : null,
+				},
 				freeze: false,
 				callback: (r) => {
 					const d = r.message || {};
@@ -715,6 +777,7 @@
 			panel.classList.toggle("open");
 			if (panel.classList.contains("open")) {
 				render();
+				paint_ctx();
 				input.focus();
 			} else {
 				Speaker.stop();

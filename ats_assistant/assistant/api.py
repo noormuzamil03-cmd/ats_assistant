@@ -56,6 +56,8 @@ Company terms (always use these, they override general ERPNext meaning):
   field workflow_state ("Pending Approval", "Rework Required", "Approved").
 - Attendance of a day ("present today", "aaj kon aya", "kaun late aya", "kaun absent hai", "department-wise
   attendance", any date) = attendance_summary tool. Leave balance of an employee = leave_balance tool.
+- "missing checkout", "checkout nahi kiya", "punch out missing", "sirf in punch", "out punch nahi" =
+  missing_checkout tool (one day or a date range, e.g. "is hafte", "is mahine" -> from_date / to_date).
 - Only use the manufacturing "Work Order" DocType if the user clearly says production / manufacturing.
 - "CEO / GM / director / manager / head / incharge kon hai" = an Employee by designation. Use search_records
   with the title (it also matches designation and department) and also try related titles, e.g. CEO ->
@@ -155,8 +157,71 @@ def _allowed():
         frappe.throw("You are not allowed to use the assistant.", frappe.PermissionError)
 
 
+CONTEXT_RULE = """
+The page the user has open right now: {what}.
+- When the user says "is / iska / iski / iske / yeh / this / is employee / is record / is report / is list", or
+  asks something that needs a record but names none, they mean THIS page. Do not ask which one.
+- {how}
+- If the user clearly names another record, use that one instead. Ignore this page for general questions.
+"""
+
+
+def _page_context(context):
+    """What the user is looking at (sent by the chat window). Checked against the user's permissions."""
+    try:
+        c = json.loads(context) if isinstance(context, str) else (context or {})
+    except Exception:
+        return "", ""
+    if not isinstance(c, dict):
+        return "", ""
+    kind = cstr(c.get("type"))
+    doctype = cstr(c.get("doctype")).strip()[:140]
+    try:
+        if kind == "form" and doctype and c.get("name"):
+            name = cstr(c.get("name")).strip()[:140]
+            if tools._blocked(doctype) or not frappe.db.exists(doctype, name) \
+                    or not frappe.has_permission(doctype, "read", name):
+                return "", ""
+            title = cstr(c.get("title")).strip()[:140]
+            label = f"{doctype} {name}" + (f" ({title})" if title and title != name else "")
+            emp = name if doctype == "Employee" else None
+            if not emp and frappe.get_meta(doctype).has_field("employee"):
+                emp = frappe.db.get_value(doctype, name, "employee")
+            how = (f'Use get_document(doctype="{doctype}", name="{name}") for its details.'
+                   + (f" Its employee ID is {emp}: use it as employee in other tools (attendance, check-ins, "
+                      f"leave balance, salary slips, missing check-out)." if emp else ""))
+            shown = name + (f" ({title})" if title and title != name else "")
+            return CONTEXT_RULE.format(what=f'the {doctype} record "{shown}"', how=how), label
+        if kind == "list" and doctype:
+            if tools._blocked(doctype) or not frappe.has_permission(doctype, "read"):
+                return "", ""
+            meta = frappe.get_meta(doctype)
+            flt_list = []
+            for f in (c.get("filters") or [])[:10]:
+                if isinstance(f, list) and len(f) >= 4 and (meta.has_field(f[1]) or f[1] in ("name", "docstatus", "owner")) \
+                        and not tools._sensitive(cstr(f[1])):
+                    flt_list.append([cstr(f[1]), cstr(f[2]), f[3]])
+            what = f"the {doctype} list" + (f" with filters {json.dumps(flt_list, default=str)}" if flt_list else "")
+            how = (f'"yeh list / in mein / inme / these" = {doctype} records with these filters: use query_records '
+                   f"or aggregate with them.")
+            return CONTEXT_RULE.format(what=what, how=how), f"{doctype} list"
+        if kind == "report" and c.get("report"):
+            report = cstr(c.get("report")).strip()[:140]
+            if not frappe.db.exists("Report", report) or not tools._report_permitted(report):
+                return "", ""
+            raw = c.get("filters") if isinstance(c.get("filters"), dict) else {}
+            filters = {k: v for k, v in raw.items() if v not in (None, "", []) and not tools._sensitive(cstr(k))}
+            how = (f'"is report" = run_report(report_name="{report}") with these filters '
+                   f"{json.dumps(filters, default=str)[:800]} (change them if the user asks).")
+            return CONTEXT_RULE.format(what=f'the report "{report}"', how=how), report
+    except Exception:
+        return "", ""
+    return "", ""
+
+
 @frappe.whitelist()
-def ask(question: str, history: str | None = None, voice: str | int | None = None, rid: str | None = None):
+def ask(question: str, history: str | None = None, voice: str | int | None = None, rid: str | None = None,
+        context: str | None = None):
     _allowed()
     question = cstr(question).strip()[:2000]
     if not question:
@@ -166,10 +231,11 @@ def ask(question: str, history: str | None = None, voice: str | int | None = Non
     started = time.time()
     calls = []
     frappe.local.ats_ai_datasets = []
-    result = _answer(question, history, calls, cstr(rid)[:40])
+    page_rule, page_label = _page_context(context)
+    result = _answer(question, history, calls, cstr(rid)[:40], page_rule)
     if not result.get("error"):
         result["datasets"] = frappe.local.ats_ai_datasets
-    audit.log(question=question, answer=result.get("answer"), calls=calls,
+    audit.log(question=(f"[{page_label}] " if page_label else "") + question, answer=result.get("answer"), calls=calls,
               provider=result.get("provider"), started=started, voice=voice,
               error=result.get("error_text"))
     result.pop("error_text", None)
@@ -179,6 +245,7 @@ def ask(question: str, history: str | None = None, voice: str | int | None = Non
 TOOL_LABELS = {
     "search_records": "Searching records", "employee_stats": "Counting employees",
     "attendance_summary": "Checking attendance", "leave_balance": "Checking leave balance",
+    "missing_checkout": "Checking missing check-outs",
     "query_records": "Reading records", "aggregate": "Calculating totals", "get_document": "Opening the record",
     "list_reports": "Looking for a report", "describe_report": "Reading report filters", "run_report": "Running the report",
     "run_sql": "Querying the database", "web_lookup": "Searching Wikipedia", "list_doctypes": "Looking up tables",
@@ -196,9 +263,9 @@ def _progress(rid, text):
         pass
 
 
-def _answer(question, history, calls, rid=None):
+def _answer(question, history, calls, rid=None, page_rule=""):
     messages = _history(history) + [{"role": "user", "content": question}]
-    system = _system_prompt()
+    system = _system_prompt() + page_rule
     used = []
     provider = ""
     started = time.time()

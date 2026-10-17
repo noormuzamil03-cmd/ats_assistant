@@ -147,3 +147,11 @@
 .ats-ai-ds-table th { position: sticky; top: 0; background: var(--subtle-fg, #f3f4f6); cursor: pointer; white-space: nowrap; }
 .ats-ai-ds-table th, .ats-ai-ds-table td { padding: 6px 10px; border-bottom: 1px solid var(--border-color, #e2e4e8); text-align: left; }
 .ats-ai-ds-table tbody tr:hover td { background: rgba(127, 127, 127, .06); }
+
+/* page context chip */
+.ats-ai-ctx { display: none; align-items: center; gap: 6px; margin: 0 10px; padding: 4px 6px 4px 10px; border-radius: 8px;
+	background: var(--subtle-fg, #f3f4f6); color: var(--text-muted, #555); font-size: 11.5px; border: 1px solid var(--border-color, #e2e4e8); }
+.ats-ai-ctx.show { display: flex; margin-top: 6px; }
+.ats-ai-ctx span { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.ats-ai-ctx button { border: 0; background: transparent; color: inherit; font-size: 15px; line-height: 1; padding: 0 4px; cursor: pointer; }
+.ats-ai-ctx button:hover { color: #d23a2e; }
