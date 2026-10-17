@@ -104,3 +104,46 @@
 .ats-ai-bar-row .bar { flex: 1; height: 12px; background: rgba(127, 127, 127, .15); border-radius: 6px; overflow: hidden; }
 .ats-ai-bar-row .bar i { display: block; height: 100%; background: #d23a2e; border-radius: 6px; }
 .ats-ai-bar-row .val { min-width: 38px; text-align: right; font-variant-numeric: tabular-nums; }
+
+/* ---- v12: bigger window, welcome, charts, full data ---- */
+#ats-ai-panel.big { width: min(820px, calc(100vw - 48px)); height: calc(100vh - 120px); }
+.ats-ai-welcome { display: flex; flex-direction: column; gap: 4px; padding: 6px 2px 10px; }
+.ats-ai-welcome b { font-size: 15px; }
+.ats-ai-welcome span { opacity: .7; font-size: 12.5px; }
+.ats-ai-chips { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 8px; }
+.ats-ai-chips button {
+	border: 1px solid var(--border-color, #d8d8d8); background: var(--card-bg, #fff); color: inherit;
+	border-radius: 14px; padding: 4px 10px; font-size: 12px; cursor: pointer;
+}
+.ats-ai-chips button:hover { border-color: #d23a2e; color: #d23a2e; }
+.ats-ai-chart-head { display: flex; align-items: center; gap: 8px; margin-bottom: 8px; flex-wrap: wrap; }
+.ats-ai-chart-head .ats-ai-chart-title { margin: 0; flex: 1; }
+.ats-ai-chart-head .sw { display: inline-flex; border: 1px solid var(--border-color, #d8d8d8); border-radius: 8px; overflow: hidden; }
+.ats-ai-chart-head .sw button { border: none; background: transparent; color: inherit; padding: 2px 8px; font-size: 11px; cursor: pointer; }
+.ats-ai-chart-head .sw button.on { background: #d23a2e; color: #fff; }
+.ats-ai-chart-head select { font-size: 11px; border-radius: 6px; border: 1px solid var(--border-color, #d8d8d8); background: var(--card-bg, #fff); color: inherit; }
+.ats-ai-chart-note { font-size: 10.5px; opacity: .6; margin-top: 4px; }
+.ats-ai-pie { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; }
+.ats-ai-pie .ttl { font-size: 15px; font-weight: 700; fill: currentColor; }
+.ats-ai-pie .legend { flex: 1; min-width: 150px; display: flex; flex-direction: column; gap: 4px; font-size: 11.5px; }
+.ats-ai-pie .lg { display: flex; align-items: center; gap: 6px; }
+.ats-ai-pie .lg i { width: 10px; height: 10px; border-radius: 3px; flex: none; }
+.ats-ai-pie .lg .lbl { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.ats-ai-pie .lg em { opacity: .6; font-style: normal; min-width: 34px; text-align: right; }
+.ats-ai-datasets { display: flex; flex-direction: column; gap: 4px; margin-top: 8px; }
+.ats-ai-ds-row { display: flex; align-items: center; gap: 6px; font-size: 11.5px; padding: 5px 8px; border-radius: 8px; background: rgba(127, 127, 127, .1); }
+.ats-ai-ds-row span { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.ats-ai-ds-row button {
+	border: 1px solid var(--border-color, #d8d8d8); background: var(--card-bg, #fff); color: inherit;
+	border-radius: 8px; padding: 1px 8px; font-size: 11px; cursor: pointer;
+}
+.ats-ai-ds-row button:hover { border-color: #d23a2e; color: #d23a2e; }
+.ats-ai-ds-bar { display: flex; gap: 8px; align-items: center; margin-bottom: 10px; }
+.ats-ai-ds-bar input { flex: 1; max-width: 320px; }
+.ats-ai-ds-bar .cnt { flex: 1; font-size: 12px; opacity: .7; }
+.ats-ai-ds-chart .ats-ai-chart { display: block; margin-bottom: 10px; }
+.ats-ai-ds-table { max-height: 62vh; overflow: auto; border: 1px solid var(--border-color, #e2e4e8); border-radius: 8px; }
+.ats-ai-ds-table table { width: 100%; border-collapse: collapse; font-size: 12.5px; }
+.ats-ai-ds-table th { position: sticky; top: 0; background: var(--subtle-fg, #f3f4f6); cursor: pointer; white-space: nowrap; }
+.ats-ai-ds-table th, .ats-ai-ds-table td { padding: 6px 10px; border-bottom: 1px solid var(--border-color, #e2e4e8); text-align: left; }
+.ats-ai-ds-table tbody tr:hover td { background: rgba(127, 127, 127, .06); }

@@ -71,9 +71,11 @@ How to answer:
 - Questions may come from voice (speech to text), so they can have spelling mistakes, Urdu script or
   mixed words. Understand the meaning; if it is really unclear, ask one short question.
 - Be short and direct. Put the main number / answer first.
-- For lists use a markdown table. If the user asks for all / sab / poori list / full list, show EVERY row you
-  received (call query_records with limit 100 and only the 2-3 fields needed). Otherwise show up to 20 rows
-  and say how many more there are.
+- For lists use a markdown table with at most 15 rows and say the total. The chat window automatically adds a
+  "View all" button with the COMPLETE list and an Excel download under your answer, so never ask the user to
+  request the full list and never paste long lists.
+- Never put "Total" / "Kul" rows inside a table (it spoils the chart); say totals in a sentence instead.
+- Keep answers short and clean: no "---" lines, no notes like "let me know if...".
 - Charts: when the user asks for a chart / graph / "...-wise" comparison, give the numbers as a markdown table
   (first column = label, then one or more number columns). The chat window draws the bar chart and offers an
   Excel download by itself, so never say you cannot draw charts or make Excel files.
@@ -163,7 +165,10 @@ def ask(question: str, history: str | None = None, voice: str | int | None = Non
 
     started = time.time()
     calls = []
+    frappe.local.ats_ai_datasets = []
     result = _answer(question, history, calls, cstr(rid)[:40])
+    if not result.get("error"):
+        result["datasets"] = frappe.local.ats_ai_datasets
     audit.log(question=question, answer=result.get("answer"), calls=calls,
               provider=result.get("provider"), started=started, voice=voice,
               error=result.get("error_text"))

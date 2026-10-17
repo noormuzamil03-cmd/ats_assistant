@@ -15,6 +15,7 @@ from frappe.utils import add_days, cint, cstr, flt, get_datetime, getdate, nowda
 MAX_ROWS = 100         # rows sent back to the AI per call
 MAX_SCAN = 100000      # rows scanned for counts / sums
 MAX_RESULT_CHARS = 6000
+FULL_LIMIT = 2000      # rows kept for the chat's "View all" / Excel buttons (never sent to the AI)
 
 # Never readable through the assistant (system / security data)
 BLOCKED_DOCTYPES = {
@@ -150,6 +151,29 @@ def _jsonable(value):
     return json.loads(json.dumps(value, default=str))
 
 
+def _label(key):
+    key = cstr(key)
+    return key if (" " in key or key[:1].isupper()) else key.replace("_", " ").title()
+
+
+def offer(title, rows, columns=None):
+    """Keep the complete rows of a result for the chat's 'View all' / Excel buttons."""
+    try:
+        if not rows:
+            return
+        if columns is None:
+            columns = list(dict.fromkeys(k for r in rows[:50] for k in r.keys()))
+        data = [[r.get(c) for c in columns] for r in rows[:FULL_LIMIT]]
+        store = getattr(frappe.local, "ats_ai_datasets", None)
+        if store is None:
+            return
+        store.append({"title": cstr(title)[:80], "columns": [_label(c) for c in columns],
+                      "rows": _jsonable(data), "total": len(rows)})
+        del store[:-4]
+    except Exception:
+        pass
+
+
 # ---------------- tools ----------------
 
 def list_doctypes(search=""):
@@ -212,9 +236,12 @@ def query_records(doctype, filters=None, fields=None, order_by=None, limit=20, p
     if parent_doctype:
         kwargs["parent_doctype"] = parent_doctype
 
-    rows = frappe.get_list(meta.name, fields=fields, order_by=order_by or "modified desc",
-                           limit_page_length=limit, **kwargs)
-    total = len(frappe.get_list(meta.name, pluck="name", limit_page_length=MAX_SCAN, **kwargs))
+    full = frappe.get_list(meta.name, fields=fields, order_by=order_by or "modified desc",
+                           limit_page_length=FULL_LIMIT, **kwargs)
+    rows = full[:limit]
+    total = len(full) if len(full) < FULL_LIMIT else \
+        len(frappe.get_list(meta.name, pluck="name", limit_page_length=MAX_SCAN, **kwargs))
+    offer(meta.name, full)
     return {"doctype": meta.name, "total_matching": total, "returned": len(rows),
             "rows": _jsonable(rows)}
 
@@ -407,6 +434,7 @@ def run_report(report_name, filters=None, limit=30):
         if ftype in NUMERIC_TYPES:
             totals[label] = round(sum(flt(r.get(label)) for r in rows), 2)
     limit = max(1, min(cint(limit) or 30, MAX_ROWS))
+    offer(report_name, rows, [label for _f, label, _t in cols])
     return _jsonable({
         "report": report_name,
         "columns": [label for _f, label, _t in cols],
@@ -550,6 +578,7 @@ def run_sql(query, limit=50):
         frappe.db.rollback()
 
     rows = [{k: v for k, v in r.items() if not _sensitive(k)} for r in rows]
+    offer("Query result", rows)
     return _jsonable({"returned": len(rows), "rows": rows[:limit],
                       "note": "" if len(rows) <= limit else f"showing {limit} rows"})
 
@@ -625,6 +654,8 @@ def employee_stats(department=None, branch=None, designation=None, status="Activ
     rows = frappe.get_list("Employee", filters=filters, fields=fields,
                            order_by="employee_name asc", limit_page_length=MAX_SCAN)
     result = {"status": status, "matched": resolved, "total": len(rows)}
+    offer("Employees" + (" - " + ", ".join(sum(resolved.values(), [])) if resolved else ""), rows,
+          ["name", "employee_name"] + [f for f in ("department", "designation", "branch") if f in fields])
     if group_by:
         groups = {}
         for r in rows:
@@ -789,6 +820,10 @@ def attendance_summary(date=None, department=None, branch=None, show=None):
             g["present" if e in present else "on_leave" if e in on_leave else "absent"] += 1
         result["by_department"] = dict(sorted(by_dept.items(), key=lambda x: -x[1]["present"])[:40])
 
+    if result.get("by_department"):
+        offer(f"Attendance by department - {day}",
+              [{"Department": k, "Present": v["present"], "Absent": v["absent"], "On Leave": v["on_leave"]}
+               for k, v in result["by_department"].items()])
     groups = {"present": present, "absent": absent, "late": late & present, "on_leave": on_leave}
     show = cstr(show).strip().lower()
     if show in groups:
@@ -798,6 +833,7 @@ def attendance_summary(date=None, department=None, branch=None, show=None):
             rows.append({"employee": e, "name": emps[e].get("employee_name"), "department": emps[e].get("department"),
                          "check_in": _hhmm(p.get("first_in")), "check_out": _hhmm(p.get("last_out"))})
         result[show + "_list"] = rows[:MAX_ROWS]
+        offer(f"{show.replace('_', ' ').title()} - {day}", rows)
         if len(rows) > MAX_ROWS:
             result["note"] = f"showing {MAX_ROWS} of {len(rows)}"
     result["counting_rule"] = ("present = machine check-in today or attendance Present / Half Day / Work From Home; "

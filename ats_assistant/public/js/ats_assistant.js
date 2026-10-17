@@ -26,6 +26,8 @@
 		const inline = (s) => s
 			.replace(/`([^`]+)`/g, "<code>$1</code>")
 			.replace(/\*\*([^*]+)\*\*/g, "<b>$1</b>")
+			.replace(/(^|[\s(])\*([^*\s][^*]*?)\*(?=[\s).,!?:;]|$)/g, "$1<i>$2</i>")
+			.replace(/(^|[\s(])_([^_\s][^_]*?)_(?=[\s).,!?:;]|$)/g, "$1<i>$2</i>")
 			.replace(/\[([^\]]+)\]\((\/[^)]*)\)/g, (m, label, url) =>
 				'<a href="' + encodeURI(url.trim()).replace(/"/g, "%22") + '" class="ats-ai-link">' + label + "</a>");
 		while (i < lines.length) {
@@ -59,6 +61,7 @@
 				html += "</ol>";
 				continue;
 			}
+			if (/^\s*([-*_])\1{2,}\s*$/.test(line)) { i++; continue; } // "---" lines
 			const h = line.match(/^\s*#{1,4}\s+(.*)$/);
 			html += h ? "<p><b>" + inline(h[1]) + "</b></p>" : (line.trim() ? "<p>" + inline(line) + "</p>" : "");
 			i++;
@@ -250,10 +253,10 @@
 		return t !== "" && !isNaN(t) ? parseFloat(t) : null;
 	}
 
-	function download_excel(heads, rows) {
+	function download_excel(heads, rows, title) {
 		const fd = new FormData();
 		fd.append("data", JSON.stringify([heads].concat(rows)));
-		fd.append("title", "ATS Assistant");
+		fd.append("title", title || "ATS Assistant");
 		fetch(EXPORT_URL, {
 			method: "POST",
 			body: fd,
@@ -264,7 +267,7 @@
 			.then((blob) => {
 				const a = document.createElement("a");
 				a.href = URL.createObjectURL(blob);
-				a.download = "ats_assistant_" + frappe.datetime.now_date() + ".xlsx";
+				a.download = String(title || "ats_assistant").replace(/[^a-z0-9]+/gi, "_").toLowerCase() + "_" + frappe.datetime.now_date() + ".xlsx";
 				document.body.appendChild(a);
 				a.click();
 				setTimeout(() => { URL.revokeObjectURL(a.href); a.remove(); }, 1500);
@@ -272,21 +275,89 @@
 			.catch(() => frappe.show_alert({ message: "Excel download failed. Please try again.", indicator: "red" }));
 	}
 
-	function draw_chart(el, heads, rows, col) {
-		// "IT - ATS", "HR - ATS" -> "IT", "HR" when every label has the same company suffix
-		const suffix = (String(rows[0][0]).match(/ - [^-]+$/) || [""])[0];
+	const COLORS = ["#d23a2e", "#2f6fdf", "#1f9d55", "#f59e0b", "#8b5cf6", "#0ea5e9", "#ec4899", "#64748b", "#14b8a6", "#a16207"];
+	const TOTAL_ROW = /^\s*(total|grand total|kul|sum|overall|total active employees)\b/i;
+
+	function chart_rows(rows) {
+		// leave out "Total" rows, and "IT - ATS" -> "IT" when all labels share the company suffix
+		rows = rows.filter((r) => !TOTAL_ROW.test(String(r[0])));
+		const suffix = rows.length ? (String(rows[0][0]).match(/ - [^-]+$/) || [""])[0] : "";
 		if (suffix && rows.every((r) => String(r[0]).endsWith(suffix))) {
 			rows = rows.map((r) => [String(r[0]).slice(0, -suffix.length)].concat(r.slice(1)));
 		}
-		const values = rows.map((r) => Math.max(0, num(r[col]) || 0));
-		const max = Math.max.apply(null, values.concat([1]));
-		let html = '<div class="ats-ai-chart-title">' + esc(heads[col]) + "</div>";
-		rows.forEach((r, i) => {
-			const pct = Math.round((values[i] / max) * 100);
+		return rows;
+	}
+
+	function numeric_columns(heads, rows) {
+		return heads.map((h, i) => i).filter((i) =>
+			i > 0 && rows.filter((r) => num(r[i]) !== null).length >= Math.max(1, Math.ceil(rows.length * 0.8)));
+	}
+
+	function bar_chart(heads, rows, col) {
+		const top = rows.slice().sort((a, b) => (num(b[col]) || 0) - (num(a[col]) || 0)).slice(0, 25);
+		const max = Math.max.apply(null, top.map((r) => Math.max(0, num(r[col]) || 0)).concat([1]));
+		let html = "";
+		top.forEach((r, i) => {
+			const v = Math.max(0, num(r[col]) || 0);
 			html += '<div class="ats-ai-bar-row"><span class="lbl" title="' + esc(r[0]) + '">' + esc(r[0]) + "</span>" +
-				'<span class="bar"><i style="width:' + pct + '%"></i></span><span class="val">' + esc(r[col]) + "</span></div>";
+				'<span class="bar"><i style="width:' + Math.max(1, Math.round((v / max) * 100)) + "%;background:" +
+				COLORS[i % COLORS.length] + '"></i></span><span class="val">' + esc(r[col]) + "</span></div>";
 		});
-		el.innerHTML = html;
+		if (rows.length > top.length) html += '<div class="ats-ai-chart-note">Top ' + top.length + " of " + rows.length + "</div>";
+		return html;
+	}
+
+	function pie_chart(heads, rows, col) {
+		const vals = rows.map((r) => Math.max(0, num(r[col]) || 0));
+		const total = vals.reduce((a, b) => a + b, 0) || 1;
+		const R = 42, C = 2 * Math.PI * R;
+		let offset = 0, arcs = "", legend = "";
+		vals.forEach((v, i) => {
+			const len = (v / total) * C;
+			const color = COLORS[i % COLORS.length];
+			arcs += '<circle r="' + R + '" cx="60" cy="60" fill="none" stroke="' + color + '" stroke-width="22" ' +
+				'stroke-dasharray="' + len.toFixed(2) + " " + (C - len).toFixed(2) + '" stroke-dashoffset="' + (-offset).toFixed(2) + '"></circle>';
+			offset += len;
+			legend += '<div class="lg"><i style="background:' + color + '"></i><span class="lbl">' + esc(rows[i][0]) +
+				'</span><b>' + esc(rows[i][col]) + "</b><em>" + Math.round((v / total) * 100) + "%</em></div>";
+		});
+		return '<div class="ats-ai-pie"><svg viewBox="0 0 120 120" width="120" height="120"><g transform="rotate(-90 60 60)">' +
+			arcs + '</g><text x="60" y="64" text-anchor="middle" class="ttl">' + esc(String(Math.round(total * 100) / 100)) +
+			'</text></svg><div class="legend">' + legend + "</div></div>";
+	}
+
+	// Chart box with Bar / Pie switch and a column picker
+	function chart_box(heads, rows, auto) {
+		rows = chart_rows(rows);
+		const cols = numeric_columns(heads, rows);
+		if (!cols.length || rows.length < 2) return null;
+		const box = document.createElement("div");
+		box.className = "ats-ai-chart";
+		let col = cols[0];
+		let type = rows.length <= 6 && cols.length === 1 ? "pie" : "bar";
+		const draw = () => {
+			let head = '<div class="ats-ai-chart-head"><span class="ats-ai-chart-title">' + esc(heads[col]) + "</span>";
+			head += '<span class="sw"><button data-t="bar" class="' + (type === "bar" ? "on" : "") + '">Bar</button>' +
+				'<button data-t="pie" class="' + (type === "pie" ? "on" : "") + '">Pie</button></span>';
+			if (cols.length > 1) {
+				head += '<select>' + cols.map((i) => '<option value="' + i + '"' + (i === col ? " selected" : "") + ">" +
+					esc(heads[i]) + "</option>").join("") + "</select>";
+			}
+			box.innerHTML = head + "</div>" + (type === "pie" ? pie_chart(heads, rows, col) : bar_chart(heads, rows, col));
+			box.querySelectorAll(".sw button").forEach((b) => b.addEventListener("click", () => { type = b.dataset.t; draw(); }));
+			const sel = box.querySelector("select");
+			if (sel) sel.addEventListener("change", () => { col = parseInt(sel.value, 10); draw(); });
+		};
+		draw();
+		box.style.display = auto ? "block" : "none";
+		return box;
+	}
+
+	function table_rows(table) {
+		const heads = Array.from(table.querySelectorAll("thead th")).map((th) => th.textContent.trim());
+		const rows = Array.from(table.querySelectorAll("tbody tr")).map((tr) =>
+			Array.from(tr.children).map((td) => td.textContent.trim()));
+		return { heads: heads, rows: rows };
 	}
 
 	function enhance_tables(container, auto_chart) {
@@ -294,49 +365,96 @@
 			const table = wrap.querySelector("table");
 			if (!table || wrap.dataset.tools) return;
 			wrap.dataset.tools = "1";
-			const heads = Array.from(table.querySelectorAll("thead th")).map((th) => th.textContent.trim());
-			const rows = Array.from(table.querySelectorAll("tbody tr")).map((tr) =>
-				Array.from(tr.children).map((td) => td.textContent.trim()));
-			if (!rows.length) return;
-			const numeric = heads.map((h, i) => i).filter((i) =>
-				i > 0 && rows.filter((r) => num(r[i]) !== null).length >= Math.max(1, Math.ceil(rows.length * 0.8)));
-			const can_chart = numeric.length && rows.length >= 2 && rows.length <= 40;
-
+			const t = table_rows(table);
+			if (!t.rows.length) return;
 			const bar = document.createElement("div");
 			bar.className = "ats-ai-tools";
-			const chart = document.createElement("div");
-			chart.className = "ats-ai-chart";
-			chart.style.display = "none";
-			let col = numeric[0];
-
-			if (can_chart) {
+			const chart = chart_box(t.heads, t.rows, auto_chart);
+			if (chart) {
 				const btn = document.createElement("button");
 				btn.textContent = "📊 Chart";
-				btn.addEventListener("click", () => {
-					const show = chart.style.display === "none";
-					chart.style.display = show ? "block" : "none";
-					if (show) draw_chart(chart, heads, rows, col);
-				});
+				btn.addEventListener("click", () => { chart.style.display = chart.style.display === "none" ? "block" : "none"; });
 				bar.appendChild(btn);
-				if (numeric.length > 1) {
-					const sel = document.createElement("select");
-					numeric.forEach((i) => { const o = document.createElement("option"); o.value = i; o.textContent = heads[i]; sel.appendChild(o); });
-					sel.addEventListener("change", () => { col = parseInt(sel.value, 10); chart.style.display = "block"; draw_chart(chart, heads, rows, col); });
-					bar.appendChild(sel);
-				}
 			}
 			const xl = document.createElement("button");
 			xl.textContent = "⬇ Excel";
-			xl.addEventListener("click", () => download_excel(heads, rows));
+			xl.addEventListener("click", () => download_excel(t.heads, t.rows));
 			bar.appendChild(xl);
-
 			wrap.after(bar);
-			bar.after(chart);
-			if (can_chart && auto_chart) {
-				chart.style.display = "block";
-				draw_chart(chart, heads, rows, col);
-			}
+			if (chart) bar.after(chart);
 		});
+	}
+
+	// Full data behind the answer: "View all" opens a big window with search, sort, chart and Excel
+	function show_dataset(ds) {
+		const d = new frappe.ui.Dialog({ title: ds.title + " (" + ds.total + ")", size: "extra-large" });
+		const root = d.$body[0];
+		root.innerHTML =
+			'<div class="ats-ai-ds"><div class="ats-ai-ds-bar"><input type="search" placeholder="Search…">' +
+			'<span class="cnt"></span><button class="btn btn-xs btn-default ch">📊 Chart</button>' +
+			'<button class="btn btn-xs btn-default xl">⬇ Excel</button></div><div class="ats-ai-ds-chart"></div>' +
+			'<div class="ats-ai-ds-table"></div></div>';
+		let rows = ds.rows.slice();
+		let sort = { col: -1, asc: true };
+		const box = root.querySelector(".ats-ai-ds-table");
+		const cnt = root.querySelector(".cnt");
+		const search = root.querySelector("input");
+		const visible = () => {
+			const q = search.value.trim().toLowerCase();
+			return q ? rows.filter((r) => r.some((c) => String(c == null ? "" : c).toLowerCase().includes(q))) : rows;
+		};
+		const paint = () => {
+			const list = visible();
+			cnt.textContent = list.length + " of " + ds.total + (ds.total > ds.rows.length ? " (first " + ds.rows.length + " loaded)" : "");
+			let html = "<table><thead><tr>" + ds.columns.map((c, i) => '<th data-i="' + i + '">' + esc(c) +
+				(sort.col === i ? (sort.asc ? " ▲" : " ▼") : "") + "</th>").join("") + "</tr></thead><tbody>";
+			list.slice(0, 1000).forEach((r) => { html += "<tr>" + r.map((c) => "<td>" + esc(c == null ? "" : c) + "</td>").join("") + "</tr>"; });
+			box.innerHTML = html + "</tbody></table>" + (list.length > 1000 ? '<div class="ats-ai-chart-note">Showing 1000 rows - use Excel for all.</div>' : "");
+			box.querySelectorAll("th").forEach((th) => th.addEventListener("click", () => {
+				const i = parseInt(th.dataset.i, 10);
+				sort = { col: i, asc: sort.col === i ? !sort.asc : true };
+				rows.sort((a, b) => {
+					const x = num(a[i]), y = num(b[i]);
+					const c = x !== null && y !== null ? x - y : String(a[i] == null ? "" : a[i]).localeCompare(String(b[i] == null ? "" : b[i]));
+					return sort.asc ? c : -c;
+				});
+				paint();
+			}));
+		};
+		search.addEventListener("input", paint);
+		root.querySelector(".xl").addEventListener("click", () => download_excel(ds.columns, visible(), ds.title));
+		const chart_area = root.querySelector(".ats-ai-ds-chart");
+		const ch = root.querySelector(".ch");
+		const test = chart_box(ds.columns, ds.rows.slice(0, 50), true);
+		if (!test) ch.style.display = "none";
+		ch.addEventListener("click", () => {
+			if (chart_area.firstChild) { chart_area.innerHTML = ""; return; }
+			const c = chart_box(ds.columns, visible().slice(0, 50), true);
+			if (c) chart_area.appendChild(c);
+		});
+		paint();
+		d.show();
+	}
+
+	function dataset_strip(datasets) {
+		const wrap = document.createElement("div");
+		wrap.className = "ats-ai-datasets";
+		(datasets || []).forEach((ds) => {
+			if (!ds || !ds.rows || !ds.rows.length) return;
+			const row = document.createElement("div");
+			row.className = "ats-ai-ds-row";
+			row.innerHTML = '<span title="' + esc(ds.title) + '">📋 ' + esc(ds.title) + " · " + ds.total + " rows</span>";
+			const view = document.createElement("button");
+			view.textContent = "View all";
+			view.addEventListener("click", () => show_dataset(ds));
+			const xl = document.createElement("button");
+			xl.textContent = "⬇ Excel";
+			xl.addEventListener("click", () => download_excel(ds.columns, ds.rows, ds.title));
+			row.appendChild(view);
+			row.appendChild(xl);
+			wrap.appendChild(row);
+		});
+		return wrap.children.length ? wrap : null;
 	}
 
 	// ---------------------------------------------------------------- widget
@@ -352,7 +470,7 @@
 		panel.id = "ats-ai-panel";
 		panel.innerHTML =
 			'<div class="ats-ai-head"><div><b>ATS Assistant</b><span>ERP data, reports &amp; HR</span></div>' +
-			'<div><button class="ats-ai-voice" title="Read answers aloud (on/off)"></button>' +
+			'<div><button class="ats-ai-max" title="Bigger window">⤢</button><button class="ats-ai-voice" title="Read answers aloud (on/off)"></button>' +
 			'<button class="ats-ai-clear" title="Clear chat">Clear</button><button class="ats-ai-close" title="Close">&times;</button></div></div>' +
 			'<div class="ats-ai-body"></div>' +
 			'<div class="ats-ai-foot">' +
@@ -396,7 +514,11 @@
 			div.appendChild(content);
 			const finish = () => {
 				content.innerHTML = role === "user" ? "<p>" + esc(text) + "</p>" : md(text);
-				if (role !== "user") enhance_tables(content, opts.chart);
+				if (role !== "user") {
+					enhance_tables(content, opts.chart);
+					const strip = dataset_strip(opts.datasets);
+					if (strip) content.appendChild(strip);
+				}
 				body.scrollTop = body.scrollHeight;
 				if (opts.done) opts.done();
 			};
@@ -428,6 +550,20 @@
 						else Speaker.play(text, play);
 					});
 					m.appendChild(play);
+					const copy = document.createElement("button");
+					copy.className = "ats-ai-play";
+					copy.textContent = "Copy";
+					copy.addEventListener("click", () => {
+						const done = () => { copy.textContent = "Copied"; setTimeout(() => { copy.textContent = "Copy"; }, 1500); };
+						if (navigator.clipboard && window.isSecureContext) navigator.clipboard.writeText(text).then(done);
+						else {
+							const ta = document.createElement("textarea");
+							ta.value = text; document.body.appendChild(ta); ta.select();
+							try { document.execCommand("copy"); done(); } catch (e) { /* ignore */ }
+							ta.remove();
+						}
+					});
+					m.appendChild(copy);
 				}
 				div.appendChild(m);
 			}
@@ -436,9 +572,30 @@
 			return div;
 		}
 
+		const SUGGESTIONS = [
+			"Today's attendance", "Who is late today?", "Department-wise attendance chart",
+			"How many active employees?", "Who is absent today?", "Open work orders",
+		];
+
 		function render() {
 			body.innerHTML = "";
-			chat.forEach((c) => bubble(c.role, c.content));
+			if (!chat.length) {
+				const w = document.createElement("div");
+				w.className = "ats-ai-welcome";
+				w.innerHTML = "<b>Hi " + esc((frappe.session.user_fullname || "").split(" ")[0] || "there") +
+					"!</b><span>Ask about attendance, employees, leaves, work orders, reports — in English or Roman Urdu.</span>";
+				const chips = document.createElement("div");
+				chips.className = "ats-ai-chips";
+				SUGGESTIONS.forEach((q) => {
+					const b = document.createElement("button");
+					b.textContent = q;
+					b.addEventListener("click", () => ask(q));
+					chips.appendChild(b);
+				});
+				w.appendChild(chips);
+				body.appendChild(w);
+			}
+			chat.forEach((c) => bubble(c.role, c.content, "", { datasets: c.datasets }));
 		}
 
 		function ask(text, via_voice) {
@@ -450,7 +607,9 @@
 			input.style.height = "";
 			send_btn.disabled = true;
 			mic_btn.disabled = true;
-			const history = chat.slice(-8);
+			const history = chat.slice(-8).map((c) => ({ role: c.role, content: c.content }));
+			const welcome = body.querySelector(".ats-ai-welcome");
+			if (welcome) welcome.remove();
 			chat.push({ role: "user", content: q });
 			save(chat);
 			bubble("user", q, via_voice ? "🎤" : "");
@@ -474,13 +633,15 @@
 				callback: (r) => {
 					const d = r.message || {};
 					const ans = d.answer || "No answer received.";
-					chat.push({ role: "assistant", content: ans });
+					const datasets = d.datasets || [];
+					chat.push({ role: "assistant", content: ans, datasets: datasets.filter((x) => x.rows && x.rows.length <= 300) });
 					save(chat);
 					wait.remove();
 					const secs = Math.round((Date.now() - started) / 1000);
 					const msg = bubble("assistant", ans, secs + "s", {
 						typing: true,
-						chart: /chart|graph|wise|compar|bar\b/i.test(q),
+						chart: /chart|graph|wise|compar|bar\b|pie/i.test(q),
+						datasets: datasets,
 					});
 					if ((auto_voice || via_voice) && !d.error) {
 						Speaker.play(ans, msg.querySelector(".ats-ai-play"));
@@ -550,6 +711,8 @@
 				}
 			);
 		});
+
+		panel.querySelector(".ats-ai-max").addEventListener("click", () => panel.classList.toggle("big"));
 
 		voice_btn.addEventListener("click", () => {
 			auto_voice = !auto_voice;
