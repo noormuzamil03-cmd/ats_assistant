@@ -46,9 +46,23 @@ SENSITIVE_FIELD = re.compile(
     r"account_no|cnic|passport|pan_number|encashment_amount|loan|advance_amount)", re.I)
 SENSITIVE_REPORT = re.compile(r"(salary|payroll|payslip|encashment|gratuity|loan|bank|income tax|ctc|advance)", re.I)
 
+# ---- Salary / payroll only (can be opened on its own: bench --site SITE set-config ats_ai_allow_salary 1)
+# Bank account, CNIC, passport, loan and advance data stay blocked.
+SALARY_DOCTYPES = {
+    "Salary Slip", "Salary Detail", "Salary Slip Timesheet", "Salary Slip Leave", "Salary Structure",
+    "Salary Structure Assignment", "Payroll Entry", "Payroll Employee Detail", "Additional Salary",
+    "Salary Withholding", "Retention Bonus", "Employee Incentive", "Leave Encashment", "Gratuity",
+}
+OTHER_PRIVATE_FIELD = re.compile(r"(bank_ac|bank_name|iban|account_no|cnic|passport|pan_number|loan|advance_amount)", re.I)
+OTHER_PRIVATE_REPORT = re.compile(r"(loan|bank|advance)", re.I)
+
 
 def _allow_sensitive():
     return bool(frappe.conf.get("ats_ai_allow_sensitive"))
+
+
+def _allow_salary():
+    return _allow_sensitive() or bool(frappe.conf.get("ats_ai_allow_salary"))
 
 
 def _blocked(doctype):
@@ -56,21 +70,27 @@ def _blocked(doctype):
     extra = set(frappe.conf.get("ats_ai_blocked_doctypes") or [])
     if doctype in BLOCKED_DOCTYPES or doctype in extra:
         return True
-    return doctype in SENSITIVE_DOCTYPES and not _allow_sensitive()
+    if doctype not in SENSITIVE_DOCTYPES or _allow_sensitive():
+        return False
+    return not (_allow_salary() and doctype in SALARY_DOCTYPES)
 
 
 def _sensitive(fieldname):
     fieldname = cstr(fieldname)
     if SENSITIVE.search(fieldname):
         return True
-    return bool(SENSITIVE_FIELD.search(fieldname)) and not _allow_sensitive()
+    if not SENSITIVE_FIELD.search(fieldname) or _allow_sensitive():
+        return False
+    # salary fields are open when salary is allowed; bank / CNIC / loan fields stay closed
+    return not _allow_salary() or bool(OTHER_PRIVATE_FIELD.search(fieldname))
 
 
 def _report_blocked(name):
     if _allow_sensitive():
         return False
     if SENSITIVE_REPORT.search(cstr(name)):
-        return True
+        if not _allow_salary() or OTHER_PRIVATE_REPORT.search(cstr(name)):
+            return True
     ref = frappe.db.get_value("Report", name, "ref_doctype")
     return bool(ref and _blocked(ref))
 

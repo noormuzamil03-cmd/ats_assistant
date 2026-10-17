@@ -77,6 +77,16 @@ How to answer:
 """
 
 
+RESTRICTED_RULE = """- Salary, payroll, bank, loan, advance, CNIC and income-tax data is restricted for the assistant. If asked,
+  say politely that this information is not available in chat and the user should open it in ERPNext.
+"""
+SALARY_OPEN_RULE = """- Salary slips, salary register, payroll, income tax and salary structures CAN be answered: use the
+  Salary Slip DocType (docstatus=1 for final slips; fields such as gross_pay, net_pay, rounded_total,
+  total_deduction, payment_days, start_date, end_date) or the salary reports. The user only sees what
+  their own ERP permissions allow. Bank account, CNIC, loan and advance data is still restricted.
+"""
+
+
 def _system_prompt():
     user = frappe.session.user
     today = getdate(nowdate())
@@ -86,7 +96,12 @@ def _system_prompt():
     company = (frappe.defaults.get_user_default("Company")
                or frappe.db.get_single_value("Global Defaults", "default_company") or "the company")
     currency = frappe.db.get_value("Company", company, "default_currency") if company else ""
-    return SYSTEM_PROMPT.format(
+    prompt = SYSTEM_PROMPT
+    if tools._allow_sensitive():
+        prompt = prompt.replace(RESTRICTED_RULE, "")
+    elif tools._allow_salary():
+        prompt = prompt.replace(RESTRICTED_RULE, SALARY_OPEN_RULE)
+    return prompt.format(
         company=company,
         today=today.isoformat(),
         weekday=today.strftime("%A"),
