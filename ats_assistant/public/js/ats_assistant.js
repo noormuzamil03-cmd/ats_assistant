@@ -113,15 +113,16 @@
 		stop() {
 			if (this.audio) { this.audio.pause(); this.audio = null; }
 			if (window.speechSynthesis) window.speechSynthesis.cancel();
-			if (this.button) { this.button.classList.remove("playing"); this.button.innerHTML = ICON.play + " Suno"; }
+			if (this.button) { this.button.classList.remove("playing"); this.button.innerHTML = ICON.play + " Listen"; }
 			this.button = null;
 		},
-		browser_voice(text) {
+		browser_voice(text, lang) {
 			if (!window.speechSynthesis || !text) return false;
 			const voices = window.speechSynthesis.getVoices();
 			const pick = (re) => voices.find((v) => re.test(v.lang));
 			let voice;
-			if (/[\u0600-\u06FF]/.test(text)) voice = pick(/^ur/i); // Urdu script: only an Urdu voice
+			if (/^en/i.test(lang || "")) voice = pick(/^en-(US|GB)/i) || pick(/^en/i); // English answer
+			else if (/[\u0600-\u06FF]/.test(text)) voice = pick(/^ur/i); // Urdu script: only an Urdu voice
 			else if (/[\u0900-\u097F]/.test(text)) voice = pick(/^hi/i); // Devanagari: Hindi voice sounds like Urdu
 			else voice = pick(/^ur/i) || pick(/^hi/i) || pick(/^en-(IN|PK)/i) || pick(/^en/i); // Roman Urdu
 			if (!voice) return false;
@@ -136,14 +137,14 @@
 		fallback(d, text) {
 			if (!this.warned) {
 				this.warned = true;
-				frappe.show_alert({ message: "Server ki Urdu awaaz band hai, browser ki awaaz use ho rahi hai.", indicator: "orange" }, 6);
+				frappe.show_alert({ message: "Server voice is not available, using the browser voice.", indicator: "orange" }, 6);
 			}
-			return this.browser_voice(d.spoken_hi) || this.browser_voice(d.spoken) || this.browser_voice(text);
+			return this.browser_voice(d.spoken_hi) || this.browser_voice(d.spoken, d.lang) || this.browser_voice(text, d.lang);
 		},
 		play(text, button) {
 			this.stop();
 			this.button = button || null;
-			if (button) { button.classList.add("playing"); button.innerHTML = ICON.stop + " Load…"; }
+			if (button) { button.classList.add("playing"); button.innerHTML = ICON.stop + " Loading…"; }
 			frappe.call({
 				method: TTS_API,
 				args: { text: text },
@@ -151,14 +152,14 @@
 				callback: (r) => {
 					if (this.button !== (button || null)) return; // stopped meanwhile
 					const d = r.message || {};
-					if (button) button.innerHTML = ICON.stop + " Roko";
+					if (button) button.innerHTML = ICON.stop + " Stop";
 					if (d.audio) {
 						this.audio = new Audio(d.audio);
 						this.audio.onended = () => this.stop();
 						this.audio.play().catch(() => { if (!this.fallback(d, text)) this.stop(); });
 					} else if (!this.fallback(d, text)) {
 						this.stop();
-						frappe.show_alert({ message: "Is browser mein awaaz ki suhulat nahi hai.", indicator: "orange" });
+						frappe.show_alert({ message: "This browser cannot play the voice.", indicator: "orange" });
 					}
 				},
 				error: () => {
@@ -222,22 +223,22 @@
 			credentials: "same-origin",
 			headers: { "X-Frappe-CSRF-Token": frappe.csrf_token || "", Accept: "application/json" },
 		}).then((r) => r.json().then((d) => {
-			if (!r.ok || d.exc_type || d.exception) throw new Error(server_error(d, "Awaaz se text nahi ban saka."));
+			if (!r.ok || d.exc_type || d.exception) throw new Error(server_error(d, "Could not convert your voice to text."));
 			return ((d.message || {}).text || "").trim();
 		}));
 	}
 
 	function mic_help() {
 		frappe.msgprint({
-			title: "Mic is page par band hai",
+			title: "Microphone is blocked on this page",
 			indicator: "orange",
 			message:
-				"Browser mic sirf <b>https</b> wale page par chalne deta hai. Do mein se ek kaam karein:<br><br>" +
-				"<b>1.</b> Chrome mein <code>chrome://flags/#unsafely-treat-insecure-origin-as-secure</code> kholein, " +
-				"box mein <code>" + frappe.utils.escape_html(window.location.origin) + "</code> likhein, " +
-				"<b>Enabled</b> karein aur Chrome <b>Relaunch</b> karein.<br>" +
-				"<b>2.</b> Ya ERP ko https (SSL) par chalayen.<br><br>" +
-				"Phir mic button dabane par mic ki ijazat (Allow) dein.",
+				"Browsers allow the microphone only on <b>https</b> pages. Do one of these:<br><br>" +
+				"<b>1.</b> In Chrome open <code>chrome://flags/#unsafely-treat-insecure-origin-as-secure</code>, " +
+				"enter <code>" + frappe.utils.escape_html(window.location.origin) + "</code>, " +
+				"set it to <b>Enabled</b> and click <b>Relaunch</b>.<br>" +
+				"<b>2.</b> Or run the ERP on https (SSL).<br><br>" +
+				"Then tap the mic button and click <b>Allow</b>.",
 		});
 	}
 
@@ -254,12 +255,12 @@
 		panel.id = "ats-ai-panel";
 		panel.innerHTML =
 			'<div class="ats-ai-head"><div><b>ATS Assistant</b><span>ERP data, reports &amp; HR</span></div>' +
-			'<div><button class="ats-ai-voice" title="Jawab awaaz mein sunein (on/off)"></button>' +
+			'<div><button class="ats-ai-voice" title="Read answers aloud (on/off)"></button>' +
 			'<button class="ats-ai-clear" title="Clear chat">Clear</button><button class="ats-ai-close" title="Close">&times;</button></div></div>' +
 			'<div class="ats-ai-body"></div>' +
 			'<div class="ats-ai-foot">' +
-			'<button class="ats-ai-mic" title="Bol kar poochein">' + ICON.mic + "</button>" +
-			'<textarea rows="1" placeholder="Poochein ya mic dabayen…"></textarea>' +
+			'<button class="ats-ai-mic" title="Ask by voice">' + ICON.mic + "</button>" +
+			'<textarea rows="1" placeholder="Ask anything or tap the mic…"></textarea>' +
 			'<button class="ats-ai-send" title="Send">' + ICON.send + "</button></div>";
 
 		document.body.appendChild(fab);
@@ -278,7 +279,7 @@
 		function paint_voice() {
 			voice_btn.innerHTML = auto_voice ? ICON.on : ICON.off;
 			voice_btn.classList.toggle("on", auto_voice);
-			voice_btn.title = auto_voice ? "Awaaz ON: har jawab bol kar sunaya jayega" : "Awaaz OFF";
+			voice_btn.title = auto_voice ? "Voice ON: every answer is read aloud" : "Voice OFF";
 		}
 		paint_voice();
 
@@ -293,7 +294,7 @@
 				if (role !== "user" && text) {
 					const play = document.createElement("button");
 					play.className = "ats-ai-play";
-					play.innerHTML = ICON.play + " Suno";
+					play.innerHTML = ICON.play + " Listen";
 					play.addEventListener("click", () => {
 						if (play.classList.contains("playing")) Speaker.stop();
 						else Speaker.play(text, play);
@@ -332,7 +333,7 @@
 			body.scrollTop = body.scrollHeight;
 			const started = Date.now();
 			const timer = setInterval(() => {
-				wait.innerHTML = "<p>Soch raha hoon… " + Math.round((Date.now() - started) / 1000) + "s</p>";
+				wait.innerHTML = "<p>Thinking… " + Math.round((Date.now() - started) / 1000) + "s</p>";
 			}, 1000);
 
 			frappe.call({
@@ -341,7 +342,7 @@
 				freeze: false,
 				callback: (r) => {
 					const d = r.message || {};
-					const ans = d.answer || "Jawab nahi mila.";
+					const ans = d.answer || "No answer received.";
 					chat.push({ role: "assistant", content: ans });
 					save(chat);
 					wait.remove();
@@ -353,7 +354,7 @@
 				},
 				error: () => {
 					wait.remove();
-					bubble("assistant", "Server se jawab nahi aaya. Dobara koshish karein.");
+					bubble("assistant", "No response from the server. Please try again.");
 				},
 				always: () => {
 					clearInterval(timer);
@@ -378,20 +379,20 @@
 			Speaker.stop();
 			mic_btn.classList.add("rec");
 			mic_btn.innerHTML = ICON.stop;
-			input.placeholder = "Bolein… (khatam ho to button dobara dabayen)";
+			input.placeholder = "Speak now… (tap the button again when done)";
 			Recorder.start(
-				(secs) => { input.placeholder = "Sun raha hoon… " + secs + "s (rokne ke liye button dabayen)"; },
+				(secs) => { input.placeholder = "Listening… " + secs + "s (tap to stop)"; },
 				(blob, type) => {
 					stop_recording_ui();
 					if (blob.size < 800) return;
-					input.placeholder = "Awaaz ko text mein badal raha hoon…";
+					input.placeholder = "Converting your voice to text…";
 					mic_btn.disabled = true;
 					upload_audio(blob, type)
 						.then((text) => {
 							input.placeholder = placeholder;
 							mic_btn.disabled = false;
 							if (!text) {
-								frappe.show_alert({ message: "Awaaz samajh nahi aayi, dobara bolein.", indicator: "orange" });
+								frappe.show_alert({ message: "Could not understand the audio, please try again.", indicator: "orange" });
 								return;
 							}
 							ask(text, true);
@@ -399,15 +400,15 @@
 						.catch((e) => {
 							input.placeholder = placeholder;
 							mic_btn.disabled = false;
-							frappe.show_alert({ message: e.message || "Awaaz se text nahi ban saka.", indicator: "red" }, 7);
+							frappe.show_alert({ message: e.message || "Could not convert your voice to text.", indicator: "red" }, 7);
 						});
 				},
 				(err) => {
 					stop_recording_ui();
 					if (err && (err.name === "NotAllowedError" || err.name === "SecurityError")) {
-						frappe.show_alert({ message: "Mic ki ijazat nahi mili. Browser mein mic Allow karein.", indicator: "red" }, 7);
+						frappe.show_alert({ message: "Microphone permission denied. Please allow the mic in your browser.", indicator: "red" }, 7);
 					} else if (err && err.name === "NotFoundError") {
-						frappe.show_alert({ message: "Is computer par mic nahi mila.", indicator: "red" }, 7);
+						frappe.show_alert({ message: "No microphone found on this computer.", indicator: "red" }, 7);
 					} else {
 						mic_help();
 					}

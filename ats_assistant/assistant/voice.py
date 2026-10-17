@@ -8,10 +8,12 @@ Text to speech : the answer is rewritten as a short spoken Urdu text by the chat
 Optional site_config settings:
     ats_ai_stt_api_key   : Groq key only for voice (default: the chat Groq key)
     ats_ai_stt_model     : default "whisper-large-v3" (most accurate for Urdu)
-    ats_ai_stt_language  : default "ur" (Urdu, so it never writes Hindi script); "auto" = detect
+    ats_ai_stt_language  : default "auto" (English stays English, Urdu is written as Urdu - never Hindi);
+                           "ur" or "en" to force one language
     ats_ai_stt_roman     : 0 to keep the Urdu script text (default: converted to Roman Urdu)
     ats_ai_tts_engine    : "edge" (default) or "browser"
-    ats_ai_tts_voice     : default "ur-PK-UzmaNeural" (male: "ur-PK-AsadNeural")
+    ats_ai_tts_voice     : Urdu voice, default "ur-PK-UzmaNeural" (male: "ur-PK-AsadNeural")
+    ats_ai_tts_voice_en  : English voice, default "en-US-AriaNeural"
     ats_ai_tts_rate      : e.g. "+10%" (default "+0%")
     ats_ai_tts_proxy     : http proxy for edge-tts if the server needs one
 """
@@ -33,10 +35,21 @@ MAX_AUDIO_BYTES = 15 * 1024 * 1024
 STT_PROMPT = ("آج کتنے لوگ حاضر ہیں؟ آئی ٹی ڈیپارٹمنٹ میں کتنے ایمپلائز ہیں؟ ورک آرڈر، اٹینڈنس، اوور ٹائم، "
               "سیلری سلپ، چھٹی، چیک ان، اسٹاک، پرچیز آرڈر، اے ٹی ایس سنتھیٹک۔")
 
+STT_PROMPT_EN = ("ATS Synthetic ERP question: how many employees are present today, IT department, "
+                 "work order, attendance, overtime, salary slip, leave, check in, stock, purchase order.")
+
 ROMAN_PROMPT = """Convert the user's text (Urdu or Hindi script, from speech recognition) into natural Roman Urdu,
 the way Pakistanis type it on WhatsApp. Keep English words in English (present, work order, department,
 employee, IT, HR, salary slip, overtime). Keep the meaning exactly; do not answer the question.
 Return only the converted text."""
+
+SPEECH_PROMPT_EN = """You turn an ERP assistant's written answer into what should be SPOKEN to the user, in English.
+Keep it short: at most 3 or 4 sentences. Main answer first. For tables or long lists say how many items there
+are and name only the first 2-3. No markdown, links, record IDs or emojis. Return only the text to speak."""
+
+ROMAN_WORDS = {"hai", "hain", "ka", "ki", "ke", "mein", "main", "nahi", "nahin", "aap", "kya", "kitne", "kitna",
+               "se", "ko", "ho", "tha", "thi", "aur", "bhi", "ye", "yeh", "wo", "woh", "raha", "rahi", "gaya",
+               "karein", "kar", "hoon", "hun", "log", "sab", "abhi", "aaj", "kal", "shukriya", "theek", "kaise"}
 
 SPEECH_PROMPT = """You turn an ERP assistant's written answer into what should be SPOKEN to the user.
 Rules:
@@ -89,18 +102,36 @@ def transcribe():
         frappe.throw("Voice is not set up: add a Groq key with "
                      "bench --site SITE set-config ats_ai_stt_api_key \"YOUR-GROQ-KEY\"")
 
-    form = {
-        "model": _conf("ats_ai_stt_model", "whisper-large-v3"),
-        "response_format": "json",
-        "temperature": "0",
-        "prompt": STT_PROMPT,
-    }
-    language = cstr(_conf("ats_ai_stt_language", "ur")).strip()
-    if language and language != "auto":
-        form["language"] = language
     filename = audio.filename or "voice.webm"
     mimetype = audio.mimetype or "audio/webm"
+    language = cstr(_conf("ats_ai_stt_language", "auto")).strip() or "auto"
 
+    if language != "auto":
+        result = _whisper(key, data, filename, mimetype, language=language,
+                          prompt=STT_PROMPT if language == "ur" else STT_PROMPT_EN)
+    else:
+        # 1) detect the language; 2) Urdu / Hindi speech is done again as Urdu (more accurate, never Hindi script)
+        result = _whisper(key, data, filename, mimetype, prompt=STT_PROMPT_EN, verbose=True)
+        detected = cstr(result.get("language")).lower()
+        if detected not in ("english", "en") and (
+            detected in ("urdu", "ur", "hindi", "hi", "punjabi", "pa")
+            or re.search(r"[\u0600-\u06FF\u0900-\u097F]", cstr(result.get("text")))
+        ):
+            result = _whisper(key, data, filename, mimetype, language="ur", prompt=STT_PROMPT)
+    text = cstr(result.get("text")).strip()
+    return {"text": _to_roman(text), "original": text}
+
+
+def _whisper(key, data, filename, mimetype, language=None, prompt=None, verbose=False):
+    form = {
+        "model": _conf("ats_ai_stt_model", "whisper-large-v3"),
+        "response_format": "verbose_json" if verbose else "json",
+        "temperature": "0",
+    }
+    if prompt:
+        form["prompt"] = prompt
+    if language:
+        form["language"] = language
     try:
         r = requests.post(_conf("ats_ai_stt_url", STT_URL), headers={"Authorization": f"Bearer {key}"},
                           data=form, files={"file": (filename, data, mimetype)}, timeout=60)
@@ -109,8 +140,7 @@ def transcribe():
     if r.status_code >= 400:
         frappe.log_error(title="ATS Assistant voice", message=r.text[:2000])
         frappe.throw(f"Voice to text failed ({r.status_code}). Please try again.")
-    text = cstr((r.json() or {}).get("text")).strip()
-    return {"text": _to_roman(text), "original": text}
+    return r.json() or {}
 
 
 def _to_roman(text):
@@ -139,6 +169,28 @@ def _plain(text):
     return " ".join(lines)[:600]
 
 
+def _is_english(text):
+    """English answer (not Roman Urdu / Urdu)?"""
+    if re.search(r"[\u0600-\u06FF\u0900-\u097F]", text):
+        return False
+    words = re.findall(r"[a-z']+", text.lower())
+    if not words:
+        return False
+    hits = sum(1 for w in words if w in ROMAN_WORDS)
+    return hits < 2 and hits / len(words) < 0.08
+
+
+def _spoken_english(text):
+    try:
+        reply = llm.chat(SPEECH_PROMPT_EN, [{"role": "user", "content": text}], [])
+        spoken = cstr(reply.get("text")).strip()
+        if spoken:
+            return spoken[:1500]
+    except Exception as e:
+        frappe.log_error(title="ATS Assistant speech text", message=cstr(e))
+    return _plain(text)
+
+
 def _spoken_text(text):
     """-> (Urdu script text, Devanagari text). Falls back to the plain answer."""
     try:
@@ -158,13 +210,13 @@ def _spoken_text(text):
     return plain, ""
 
 
-def _edge_tts(text):
+def _edge_tts(text, voice=None):
     import edge_tts
 
     kwargs = {"rate": _conf("ats_ai_tts_rate", "+0%")}
     if _conf("ats_ai_tts_proxy"):
         kwargs["proxy"] = _conf("ats_ai_tts_proxy")
-    communicate = edge_tts.Communicate(text, _conf("ats_ai_tts_voice", "ur-PK-UzmaNeural"), **kwargs)
+    communicate = edge_tts.Communicate(text, voice or _conf("ats_ai_tts_voice", "ur-PK-UzmaNeural"), **kwargs)
     audio = bytearray()
     for chunk in communicate.stream_sync():
         if chunk.get("type") == "audio":
@@ -187,19 +239,25 @@ def speak(text: str):
         return cached
 
     _rate_limit()
-    spoken, spoken_hi = _spoken_text(text)
+    english = _is_english(text)
+    if english:
+        spoken, spoken_hi, lang = _spoken_english(text), "", "en-US"
+        voice = _conf("ats_ai_tts_voice_en", "en-US-AriaNeural")
+    else:
+        (spoken, spoken_hi), lang = _spoken_text(text), "ur-PK"
+        voice = _conf("ats_ai_tts_voice", "ur-PK-UzmaNeural")
     audio = None
     engine = "browser"
     if _conf("ats_ai_tts_engine", "edge") == "edge":
         try:
-            mp3 = _edge_tts(spoken)
+            mp3 = _edge_tts(spoken, voice)
             if mp3:
                 audio = "data:audio/mpeg;base64," + base64.b64encode(mp3).decode()
                 engine = "edge"
         except Exception as e:
             frappe.log_error(title="ATS Assistant voice (edge-tts)", message=cstr(e))
 
-    result = {"spoken": spoken, "spoken_hi": spoken_hi, "audio": audio, "engine": engine, "lang": "ur-PK"}
+    result = {"spoken": spoken, "spoken_hi": spoken_hi, "audio": audio, "engine": engine, "lang": lang}
     if audio:
         frappe.cache().set_value(cache_key, result, expires_in_sec=3600)
     return result

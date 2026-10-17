@@ -27,7 +27,7 @@ How to work:
 - General questions about the world (who is the current president / prime minister / CEO of a famous company,
   countries, cities, history, definitions, sports, science): use web_lookup and answer from it, because your
   own knowledge can be out of date. Say the answer comes from Wikipedia. Never send company data to it.
-  For simple chit-chat (salam, kaise ho, shukriya) just answer politely without tools.
+  For simple chit-chat (hi, how are you, salam, kaise ho, thanks) just answer politely without tools.
 - When the user names a person, card/attendance ID, item, machine, customer or document, call search_records
   first to get the exact record and ID, then query with that ID.
 - For questions that need joins, per-day / per-month grouping or calculations across tables use run_sql
@@ -62,8 +62,10 @@ Company terms (always use these, they override general ERPNext meaning):
   'Chief', 'Director', 'Managing'; GM -> 'General Manager'. Only say nobody was found after these tries.
 
 How to answer:
-- Language: reply in Roman Urdu by default. Reply in English only if the user's whole message is in English
-  (a few English words like 'present', 'work order', 'approval' do not count).
+- Language: always reply in the SAME language as the user's latest message.
+  English message (e.g. hi, hello, how are you, how many employees) -> reply in English.
+  Roman Urdu message (e.g. kaise ho, aaj kitne log present hain) -> reply in Roman Urdu.
+  Urdu script message -> reply in Urdu script. English ERP words inside a Roman Urdu sentence keep it Roman Urdu.
 - Talk like a helpful colleague, not a database: do not mention DocType names, field names, workflow_state,
   filters or tool names in the answer, unless the user asks how it was calculated.
 - Questions may come from voice (speech to text), so they can have spelling mistakes, Urdu script or
@@ -136,7 +138,7 @@ def _rate_limit():
     count = frappe.cache().incr(key)
     frappe.cache().expire(key, 70)
     if count > PER_MINUTE:
-        frappe.throw("Bohot zyada sawal ek saath. Ek minute baad dobara poochein.", title="Please wait")
+        frappe.throw("Too many questions at once. Please try again in a minute.", title="Please wait")
 
 
 def _allowed():
@@ -175,12 +177,12 @@ def _answer(question, history, calls):
     try:
         for _step in range(MAX_STEPS):
             if time.time() - started > MAX_SECONDS:
-                return {"answer": "AI service is waqt bohot busy hai (free limit). 1 minute baad dobara poochein.",
+                return {"answer": "The AI service is busy right now (free limit). Please try again in a minute.",
                         "tools": used, "provider": provider, "error": 1, "error_text": "Time limit reached"}
             reply = llm.chat(system, messages, tools.get_schemas())
             provider = (reply.get("provider", "") + " / " + reply.get("model", "")) if reply.get("provider") else provider
             if not reply["tool_calls"]:
-                return {"answer": reply["text"] or "Maaf kijiye, jawab nahi mil saka.",
+                return {"answer": reply["text"] or "Sorry, I could not find an answer.",
                         "tools": used, "provider": provider}
             messages.append({"role": "assistant", "content": reply["text"], "tool_calls": reply["tool_calls"]})
             for tc in reply["tool_calls"]:
@@ -189,11 +191,11 @@ def _answer(question, history, calls):
                 calls.append({"tool": tc["name"], "args": tc["args"],
                               "error": output[:300] if output.startswith('{"error"') else ""})
                 messages.append({"role": "tool", "tool_call_id": tc["id"], "name": tc["name"], "content": output})
-        return {"answer": "Sawal ka jawab dhoondne mein bohot steps lag gaye. Sawal thora seedha kar ke dobara poochein.",
+        return {"answer": "This took too many steps. Please ask the question in a simpler way.",
                 "tools": used, "provider": provider, "error_text": "Too many steps"}
     except llm.LLMError as e:
         frappe.log_error(title="ATS Assistant", message=cstr(e))
-        return {"answer": f"AI service se jawab nahi aa saka: {e}", "tools": used, "error": 1,
+        return {"answer": f"The AI service did not answer: {e}", "tools": used, "error": 1,
                 "provider": provider, "error_text": cstr(e)}
 
 
