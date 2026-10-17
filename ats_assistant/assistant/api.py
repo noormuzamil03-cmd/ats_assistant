@@ -133,7 +133,11 @@ def _history(history):
     for h in (history or [])[-MAX_HISTORY:]:
         role = h.get("role") if isinstance(h, dict) else None
         if role in ("user", "assistant") and h.get("content"):
-            out.append({"role": role, "content": cstr(h["content"])[:800]})
+            content = cstr(h["content"])[:800]
+            if role == "user":
+                page = cstr(h.get("page")).strip()[:120]
+                content = f"(asked on page: {page or 'no page'}) {content}"
+            out.append({"role": role, "content": content})
     # The conversation must start with the user
     while out and out[0]["role"] != "user":
         out.pop(0)
@@ -163,6 +167,10 @@ The page the user has open right now: {what}.
   asks something that needs a record but names none, they mean THIS page. Do not ask which one.
 - {how}
 - If the user clearly names another record, use that one instead. Ignore this page for general questions.
+- Earlier messages show the page they were asked on. If this page is different from the page of the previous
+  question, a short or vague question ("total kitne hain", "kitne hain", "list do", "kis ke hain") is about
+  THIS page, not the earlier topic. Follow the earlier topic only when the user clearly continues it
+  ("aur kal ka?", "IT ka bhi batao").
 """
 
 

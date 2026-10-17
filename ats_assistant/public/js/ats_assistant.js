@@ -654,11 +654,11 @@
 			input.style.height = "";
 			send_btn.disabled = true;
 			mic_btn.disabled = true;
-			const history = chat.slice(-8).map((c) => ({ role: c.role, content: c.content }));
+			const history = chat.slice(-8).map((c) => ({ role: c.role, content: c.content, page: c.page || "" }));
 			const welcome = body.querySelector(".ats-ai-welcome");
 			if (welcome) welcome.remove();
 			const ctx = paint_ctx();
-			chat.push({ role: "user", content: q });
+			chat.push({ role: "user", content: q, page: ctx ? ctx.label.replace(/^\S+\s/, "") : "" });
 			save(chat);
 			bubble("user", q, (via_voice ? "🎤 " : "") + (ctx ? ctx.label : ""));
 			const wait = document.createElement("div");
