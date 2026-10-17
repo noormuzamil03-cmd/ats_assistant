@@ -242,6 +242,103 @@
 		});
 	}
 
+	// ---------------------------------------------------------------- tables: chart + Excel
+	const EXPORT_URL = "/api/method/ats_assistant.assistant.api.export_table";
+
+	function num(v) {
+		const t = String(v == null ? "" : v).replace(/[,\s%]|rs\.?|pkr/gi, "");
+		return t !== "" && !isNaN(t) ? parseFloat(t) : null;
+	}
+
+	function download_excel(heads, rows) {
+		const fd = new FormData();
+		fd.append("data", JSON.stringify([heads].concat(rows)));
+		fd.append("title", "ATS Assistant");
+		fetch(EXPORT_URL, {
+			method: "POST",
+			body: fd,
+			credentials: "same-origin",
+			headers: { "X-Frappe-CSRF-Token": frappe.csrf_token || "" },
+		})
+			.then((r) => { if (!r.ok) throw new Error(r.status); return r.blob(); })
+			.then((blob) => {
+				const a = document.createElement("a");
+				a.href = URL.createObjectURL(blob);
+				a.download = "ats_assistant_" + frappe.datetime.now_date() + ".xlsx";
+				document.body.appendChild(a);
+				a.click();
+				setTimeout(() => { URL.revokeObjectURL(a.href); a.remove(); }, 1500);
+			})
+			.catch(() => frappe.show_alert({ message: "Excel download failed. Please try again.", indicator: "red" }));
+	}
+
+	function draw_chart(el, heads, rows, col) {
+		// "IT - ATS", "HR - ATS" -> "IT", "HR" when every label has the same company suffix
+		const suffix = (String(rows[0][0]).match(/ - [^-]+$/) || [""])[0];
+		if (suffix && rows.every((r) => String(r[0]).endsWith(suffix))) {
+			rows = rows.map((r) => [String(r[0]).slice(0, -suffix.length)].concat(r.slice(1)));
+		}
+		const values = rows.map((r) => Math.max(0, num(r[col]) || 0));
+		const max = Math.max.apply(null, values.concat([1]));
+		let html = '<div class="ats-ai-chart-title">' + esc(heads[col]) + "</div>";
+		rows.forEach((r, i) => {
+			const pct = Math.round((values[i] / max) * 100);
+			html += '<div class="ats-ai-bar-row"><span class="lbl" title="' + esc(r[0]) + '">' + esc(r[0]) + "</span>" +
+				'<span class="bar"><i style="width:' + pct + '%"></i></span><span class="val">' + esc(r[col]) + "</span></div>";
+		});
+		el.innerHTML = html;
+	}
+
+	function enhance_tables(container, auto_chart) {
+		container.querySelectorAll(".ats-ai-tw").forEach((wrap) => {
+			const table = wrap.querySelector("table");
+			if (!table || wrap.dataset.tools) return;
+			wrap.dataset.tools = "1";
+			const heads = Array.from(table.querySelectorAll("thead th")).map((th) => th.textContent.trim());
+			const rows = Array.from(table.querySelectorAll("tbody tr")).map((tr) =>
+				Array.from(tr.children).map((td) => td.textContent.trim()));
+			if (!rows.length) return;
+			const numeric = heads.map((h, i) => i).filter((i) =>
+				i > 0 && rows.filter((r) => num(r[i]) !== null).length >= Math.max(1, Math.ceil(rows.length * 0.8)));
+			const can_chart = numeric.length && rows.length >= 2 && rows.length <= 40;
+
+			const bar = document.createElement("div");
+			bar.className = "ats-ai-tools";
+			const chart = document.createElement("div");
+			chart.className = "ats-ai-chart";
+			chart.style.display = "none";
+			let col = numeric[0];
+
+			if (can_chart) {
+				const btn = document.createElement("button");
+				btn.textContent = "📊 Chart";
+				btn.addEventListener("click", () => {
+					const show = chart.style.display === "none";
+					chart.style.display = show ? "block" : "none";
+					if (show) draw_chart(chart, heads, rows, col);
+				});
+				bar.appendChild(btn);
+				if (numeric.length > 1) {
+					const sel = document.createElement("select");
+					numeric.forEach((i) => { const o = document.createElement("option"); o.value = i; o.textContent = heads[i]; sel.appendChild(o); });
+					sel.addEventListener("change", () => { col = parseInt(sel.value, 10); chart.style.display = "block"; draw_chart(chart, heads, rows, col); });
+					bar.appendChild(sel);
+				}
+			}
+			const xl = document.createElement("button");
+			xl.textContent = "⬇ Excel";
+			xl.addEventListener("click", () => download_excel(heads, rows));
+			bar.appendChild(xl);
+
+			wrap.after(bar);
+			bar.after(chart);
+			if (can_chart && auto_chart) {
+				chart.style.display = "block";
+				draw_chart(chart, heads, rows, col);
+			}
+		});
+	}
+
 	// ---------------------------------------------------------------- widget
 	function build() {
 		if (!allowed()) return;
@@ -274,6 +371,13 @@
 		const placeholder = input.placeholder;
 		let chat = load();
 		let busy = false;
+		let current = {};
+		// live status from the server ("Checking attendance…", "Running the report…")
+		if (frappe.realtime && frappe.realtime.on) {
+			frappe.realtime.on("ats_ai_progress", (d) => {
+				if (d && d.rid && d.rid === current.rid) current.text = d.text;
+			});
+		}
 		let auto_voice = pref("voice") === "1";
 
 		function paint_voice() {
@@ -283,10 +387,34 @@
 		}
 		paint_voice();
 
-		function bubble(role, text, meta) {
+		function bubble(role, text, meta, opts) {
+			opts = opts || {};
 			const div = document.createElement("div");
 			div.className = "ats-ai-msg " + (role === "user" ? "me" : "bot");
-			div.innerHTML = role === "user" ? "<p>" + esc(text) + "</p>" : md(text);
+			const content = document.createElement("div");
+			content.className = "ats-ai-content";
+			div.appendChild(content);
+			const finish = () => {
+				content.innerHTML = role === "user" ? "<p>" + esc(text) + "</p>" : md(text);
+				if (role !== "user") enhance_tables(content, opts.chart);
+				body.scrollTop = body.scrollHeight;
+				if (opts.done) opts.done();
+			};
+			if (opts.typing && role !== "user" && text) {
+				// answer appears word by word
+				const steps = Math.min(45, Math.max(6, Math.ceil(text.length / 14)));
+				let i = 0;
+				const tick = () => {
+					i++;
+					content.innerHTML = md(text.slice(0, Math.ceil((text.length * i) / steps)));
+					body.scrollTop = body.scrollHeight;
+					if (i < steps) setTimeout(tick, 20);
+					else finish();
+				};
+				tick();
+			} else {
+				finish();
+			}
 			if (role !== "user" || meta) {
 				const m = document.createElement("div");
 				m.className = "ats-ai-meta";
@@ -332,13 +460,16 @@
 			body.appendChild(wait);
 			body.scrollTop = body.scrollHeight;
 			const started = Date.now();
-			const timer = setInterval(() => {
-				wait.innerHTML = "<p>Thinking… " + Math.round((Date.now() - started) / 1000) + "s</p>";
-			}, 1000);
+			const rid = Math.random().toString(36).slice(2, 12);
+			current = { rid: rid, text: "Thinking" };
+			const paint = () => {
+				wait.innerHTML = "<p>" + esc(current.text) + "… " + Math.round((Date.now() - started) / 1000) + "s</p>";
+			};
+			const timer = setInterval(paint, 1000);
 
 			frappe.call({
 				method: API,
-				args: { question: q, history: JSON.stringify(history), voice: via_voice ? 1 : 0 },
+				args: { question: q, history: JSON.stringify(history), voice: via_voice ? 1 : 0, rid: rid },
 				freeze: false,
 				callback: (r) => {
 					const d = r.message || {};
@@ -347,7 +478,10 @@
 					save(chat);
 					wait.remove();
 					const secs = Math.round((Date.now() - started) / 1000);
-					const msg = bubble("assistant", ans, secs + "s");
+					const msg = bubble("assistant", ans, secs + "s", {
+						typing: true,
+						chart: /chart|graph|wise|compar|bar\b/i.test(q),
+					});
 					if ((auto_voice || via_voice) && !d.error) {
 						Speaker.play(ans, msg.querySelector(".ats-ai-play"));
 					}
@@ -358,6 +492,7 @@
 				},
 				always: () => {
 					clearInterval(timer);
+					current = {};
 					busy = false;
 					send_btn.disabled = false;
 					mic_btn.disabled = false;

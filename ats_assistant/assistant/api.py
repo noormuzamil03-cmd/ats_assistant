@@ -54,8 +54,8 @@ Company terms (always use these, they override general ERPNext meaning):
   "open work orders" = Work Order Slip with work_status != "Completed" and docstatus != 2.
 - "completion", "approval", "pending approval", "rework" = DocType "Work Order Completion",
   field workflow_state ("Pending Approval", "Rework Required", "Approved").
-- "present today / aaj kon aya / kis time aya" = Employee Checkin for today (count distinct employee,
-  first IN time). Attendance is marked later, so use Employee Checkin for today.
+- Attendance of a day ("present today", "aaj kon aya", "kaun late aya", "kaun absent hai", "department-wise
+  attendance", any date) = attendance_summary tool. Leave balance of an employee = leave_balance tool.
 - Only use the manufacturing "Work Order" DocType if the user clearly says production / manufacturing.
 - "CEO / GM / director / manager / head / incharge kon hai" = an Employee by designation. Use search_records
   with the title (it also matches designation and department) and also try related titles, e.g. CEO ->
@@ -74,6 +74,9 @@ How to answer:
 - For lists use a markdown table. If the user asks for all / sab / poori list / full list, show EVERY row you
   received (call query_records with limit 100 and only the 2-3 fields needed). Otherwise show up to 20 rows
   and say how many more there are.
+- Charts: when the user asks for a chart / graph / "...-wise" comparison, give the numbers as a markdown table
+  (first column = label, then one or more number columns). The chat window draws the bar chart and offers an
+  Excel download by itself, so never say you cannot draw charts or make Excel files.
 - Link records like [EMP-0001](/app/employee/EMP-0001) (doctype in lower case with - instead of spaces).
 - If data is not found, say so clearly and suggest what to check.
 """
@@ -151,7 +154,7 @@ def _allowed():
 
 
 @frappe.whitelist()
-def ask(question: str, history: str | None = None, voice: str | int | None = None):
+def ask(question: str, history: str | None = None, voice: str | int | None = None, rid: str | None = None):
     _allowed()
     question = cstr(question).strip()[:2000]
     if not question:
@@ -160,7 +163,7 @@ def ask(question: str, history: str | None = None, voice: str | int | None = Non
 
     started = time.time()
     calls = []
-    result = _answer(question, history, calls)
+    result = _answer(question, history, calls, cstr(rid)[:40])
     audit.log(question=question, answer=result.get("answer"), calls=calls,
               provider=result.get("provider"), started=started, voice=voice,
               error=result.get("error_text"))
@@ -168,7 +171,27 @@ def ask(question: str, history: str | None = None, voice: str | int | None = Non
     return result
 
 
-def _answer(question, history, calls):
+TOOL_LABELS = {
+    "search_records": "Searching records", "employee_stats": "Counting employees",
+    "attendance_summary": "Checking attendance", "leave_balance": "Checking leave balance",
+    "query_records": "Reading records", "aggregate": "Calculating totals", "get_document": "Opening the record",
+    "list_reports": "Looking for a report", "describe_report": "Reading report filters", "run_report": "Running the report",
+    "run_sql": "Querying the database", "web_lookup": "Searching Wikipedia", "list_doctypes": "Looking up tables",
+    "describe_doctype": "Reading fields", "system_info": "Reading system info",
+}
+
+
+def _progress(rid, text):
+    """Live status in the chat bubble (needs the realtime / socket.io service; silently skipped otherwise)."""
+    if not rid:
+        return
+    try:
+        frappe.publish_realtime("ats_ai_progress", {"rid": rid, "text": text}, user=frappe.session.user)
+    except Exception:
+        pass
+
+
+def _answer(question, history, calls, rid=None):
     messages = _history(history) + [{"role": "user", "content": question}]
     system = _system_prompt()
     used = []
@@ -179,6 +202,7 @@ def _answer(question, history, calls):
             if time.time() - started > MAX_SECONDS:
                 return {"answer": "The AI service is busy right now (free limit). Please try again in a minute.",
                         "tools": used, "provider": provider, "error": 1, "error_text": "Time limit reached"}
+            _progress(rid, "Thinking")
             reply = llm.chat(system, messages, tools.get_schemas())
             provider = (reply.get("provider", "") + " / " + reply.get("model", "")) if reply.get("provider") else provider
             if not reply["tool_calls"]:
@@ -187,6 +211,10 @@ def _answer(question, history, calls):
             messages.append({"role": "assistant", "content": reply["text"], "tool_calls": reply["tool_calls"]})
             for tc in reply["tool_calls"]:
                 used.append(tc["name"])
+                label = TOOL_LABELS.get(tc["name"], "Working")
+                detail = (tc["args"] or {}).get("doctype") or (tc["args"] or {}).get("report_name") \
+                    or (tc["args"] or {}).get("department") or ""
+                _progress(rid, f"{label} {detail}".strip())
                 output = tools.run_tool(tc["name"], tc["args"])
                 calls.append({"tool": tc["name"], "args": tc["args"],
                               "error": output[:300] if output.startswith('{"error"') else ""})
@@ -208,3 +236,33 @@ def status():
         return {"ok": 1, "providers": [{"provider": x.provider, "model": x.model} for x in p]}
     except llm.LLMError as e:
         return {"ok": 0, "error": cstr(e)}
+
+
+@frappe.whitelist()
+def export_table(data: str, title: str | None = None):
+    """A table from the chat (JSON list of rows, first row = headings) -> Excel file download."""
+    _allowed()
+    try:
+        rows = json.loads(data or "[]")
+    except Exception:
+        frappe.throw("Invalid table data.")
+    if not isinstance(rows, list) or not rows:
+        frappe.throw("The table is empty.")
+
+    def cell(v):
+        text = cstr(v).strip()
+        num = text.replace(",", "")
+        try:
+            return int(num) if num.lstrip("-").isdigit() else float(num) if num.count(".") == 1 and \
+                num.replace(".", "", 1).lstrip("-").isdigit() else text
+        except Exception:
+            return text
+
+    rows = [[cell(v) for v in (r if isinstance(r, list) else [r])][:50] for r in rows[:5000]]
+    from frappe.utils.xlsxutils import make_xlsx
+
+    sheet = (cstr(title) or "ATS Assistant")[:30]
+    xlsx = make_xlsx(rows, sheet)
+    frappe.response["filename"] = frappe.scrub(sheet) + ".xlsx"
+    frappe.response["filecontent"] = xlsx.getvalue()
+    frappe.response["type"] = "binary"

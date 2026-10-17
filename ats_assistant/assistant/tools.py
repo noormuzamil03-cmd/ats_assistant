@@ -10,7 +10,7 @@ import os
 import re
 
 import frappe
-from frappe.utils import cint, cstr, flt
+from frappe.utils import add_days, cint, cstr, flt, get_datetime, getdate, nowdate
 
 MAX_ROWS = 100         # rows sent back to the AI per call
 MAX_SCAN = 100000      # rows scanned for counts / sums
@@ -46,7 +46,7 @@ SENSITIVE_FIELD = re.compile(
     r"account_no|cnic|passport|pan_number|encashment_amount|loan|advance_amount)", re.I)
 SENSITIVE_REPORT = re.compile(r"(salary|payroll|payslip|encashment|gratuity|loan|bank|income tax|ctc|advance)", re.I)
 
-# ---- Salary / payroll only (can be opened on its own: bench --site SITE set-config ats_ai_allow_salary 1)
+# ---- Salary / payroll: open by default (bench --site SITE set-config ats_ai_allow_salary 0 closes it)
 # Bank account, CNIC, passport, loan and advance data stay blocked.
 SALARY_DOCTYPES = {
     "Salary Slip", "Salary Detail", "Salary Slip Timesheet", "Salary Slip Leave", "Salary Structure",
@@ -64,6 +64,7 @@ def _allow_sensitive():
 def _allow_salary():
     # Salary / payroll is open by default; close it with: bench --site SITE set-config ats_ai_allow_salary 0
     return _allow_sensitive() or str(frappe.conf.get("ats_ai_allow_salary", 1)) != "0"
+
 
 def _blocked(doctype):
     doctype = cstr(doctype).strip()
@@ -674,6 +675,179 @@ def web_lookup(query, lang="en"):
             "note": "Use these facts (they are newer than your own knowledge) and mention Wikipedia."}
 
 
+# ---------------- ready-made HR tools (standard HRMS DocTypes only) ----------------
+
+def _readable(doctype):
+    return frappe.db.exists("DocType", doctype) and not _blocked(doctype) and frappe.has_permission(doctype, "read")
+
+
+def _hhmm(value):
+    return get_datetime(value).strftime("%I:%M %p") if value else ""
+
+
+def _seconds(value):
+    """Shift start time (timedelta / 'HH:MM:SS') -> seconds after midnight."""
+    if value is None:
+        return None
+    if hasattr(value, "total_seconds"):
+        return int(value.total_seconds())
+    parts = [int(float(x)) for x in cstr(value).split(":")[:3]] + [0, 0]
+    return parts[0] * 3600 + parts[1] * 60 + parts[2]
+
+
+def attendance_summary(date=None, department=None, branch=None, show=None):
+    """Who is present / absent / late / on leave on one day, with department-wise counts."""
+    if not _readable("Employee"):
+        raise ToolError("You do not have permission to read Employee.")
+    day = getdate(date) if date else getdate(nowdate())
+    meta = frappe.get_meta("Employee")
+    filters = {"status": "Active"}
+    resolved = {}
+    for field, doctype, value in (("department", "Department", department), ("branch", "Branch", branch)):
+        if value:
+            names = _resolve_names(doctype, value)
+            if not names:
+                raise ToolError(f"No {doctype} matches '{value}'.")
+            filters[field] = ["in", names]
+            resolved[field] = names
+    fields = ["name", "employee_name"] + _existing_fields(meta, ["department", "designation", "default_shift", "company"])
+    emps = {e.name: e for e in frappe.get_list("Employee", filters=filters, fields=fields, limit_page_length=MAX_SCAN)}
+    ids = list(emps)
+    result = {"date": str(day), "weekday": day.strftime("%A"), "matched": resolved, "active_employees": len(ids)}
+    if not ids:
+        return result
+
+    # holiday?
+    try:
+        company = next((e.get("company") for e in emps.values() if e.get("company")), None) \
+            or frappe.defaults.get_user_default("Company")
+        holiday_list = frappe.get_cached_value("Company", company, "default_holiday_list") if company else None
+        if holiday_list:
+            holiday = frappe.db.get_value("Holiday", {"parent": holiday_list, "holiday_date": day}, "description")
+            if holiday is not None:
+                result["holiday"] = frappe.utils.strip_html(cstr(holiday)) or "Holiday"
+    except Exception:
+        pass
+
+    # punches (machine check-ins)
+    punches = {}
+    if _readable("Employee Checkin"):
+        for c in frappe.get_list("Employee Checkin",
+                                 filters={"employee": ["in", ids], "time": ["between", [f"{day} 00:00:00", f"{day} 23:59:59"]]},
+                                 fields=["employee", "time", "log_type"], order_by="time asc", limit_page_length=MAX_SCAN):
+            d = punches.setdefault(c.employee, {"first_in": None, "last_out": None})
+            if c.log_type == "OUT":
+                d["last_out"] = c.time
+            elif c.log_type == "IN":
+                d["first_in"] = d["first_in"] or c.time
+            else:  # no IN/OUT on the machine: first punch = in, last punch = out
+                d["first_in"] = d["first_in"] or c.time
+                d["last_out"] = c.time
+
+    # attendance records (marked later in the day / for past days)
+    att = {}
+    if _readable("Attendance"):
+        a_meta = frappe.get_meta("Attendance")
+        a_fields = ["employee", "status"] + _existing_fields(a_meta, ["late_entry", "early_exit", "leave_type"])
+        for a in frappe.get_list("Attendance", filters={"employee": ["in", ids], "attendance_date": day, "docstatus": 1},
+                                 fields=a_fields, limit_page_length=MAX_SCAN):
+            att[a.employee] = a
+
+    on_leave = {e for e, a in att.items() if a.status == "On Leave"}
+    if _readable("Leave Application"):
+        on_leave |= set(frappe.get_list("Leave Application",
+                                        filters={"employee": ["in", ids], "status": "Approved", "docstatus": 1,
+                                                 "from_date": ["<=", day], "to_date": [">=", day]},
+                                        pluck="employee", limit_page_length=MAX_SCAN))
+    everyone = set(ids)
+    present = (set(punches) | {e for e, a in att.items() if a.status in ("Present", "Half Day", "Work From Home")}) & everyone
+    on_leave = (on_leave & everyone) - present
+    absent = set(ids) - present - on_leave
+
+    # late: attendance flag, otherwise first punch after shift start + grace
+    late = {e for e, a in att.items() if cint(a.get("late_entry"))} & present
+    shift_cache = {}
+    for e in present - late:
+        shift = emps[e].get("default_shift")
+        first_in = (punches.get(e) or {}).get("first_in")
+        if not shift or not first_in:
+            continue
+        if shift not in shift_cache:
+            row = frappe.db.get_value("Shift Type", shift, ["start_time", "late_entry_grace_period"], as_dict=True) or {}
+            start = _seconds(row.get("start_time"))
+            shift_cache[shift] = None if start is None else start + cint(row.get("late_entry_grace_period")) * 60
+        limit = shift_cache[shift]
+        t = get_datetime(first_in)
+        if limit is not None and t.hour * 3600 + t.minute * 60 + t.second > limit:
+            late.add(e)
+
+    result.update({"present": len(present), "absent": len(absent), "on_leave": len(on_leave), "late": len(late & present)})
+    if not resolved.get("department") or len(resolved["department"]) > 1:
+        by_dept = {}
+        for e, emp in emps.items():
+            g = by_dept.setdefault(cstr(emp.get("department")) or "(not set)", {"present": 0, "absent": 0, "on_leave": 0})
+            g["present" if e in present else "on_leave" if e in on_leave else "absent"] += 1
+        result["by_department"] = dict(sorted(by_dept.items(), key=lambda x: -x[1]["present"])[:40])
+
+    groups = {"present": present, "absent": absent, "late": late & present, "on_leave": on_leave}
+    show = cstr(show).strip().lower()
+    if show in groups:
+        rows = []
+        for e in sorted(groups[show], key=lambda x: cstr(emps[x].get("employee_name"))):
+            p = punches.get(e) or {}
+            rows.append({"employee": e, "name": emps[e].get("employee_name"), "department": emps[e].get("department"),
+                         "check_in": _hhmm(p.get("first_in")), "check_out": _hhmm(p.get("last_out"))})
+        result[show + "_list"] = rows[:MAX_ROWS]
+        if len(rows) > MAX_ROWS:
+            result["note"] = f"showing {MAX_ROWS} of {len(rows)}"
+    result["counting_rule"] = ("present = machine check-in today or attendance Present / Half Day / Work From Home; "
+                               "on_leave = approved leave; absent = the rest of the active employees")
+    return _jsonable(result)
+
+
+def leave_balance(employee, leave_type=None, date=None):
+    """Remaining leaves of one employee (all leave types, or one)."""
+    if not _readable("Leave Allocation"):
+        raise ToolError("You do not have permission to read leave data.")
+    emp = cstr(employee).strip()
+    if not frappe.db.exists("Employee", emp):
+        found = search_records(emp, doctype="Employee", limit=5).get("matches") or []
+        if len(found) != 1:
+            return {"error": "Please say which employee exactly.", "candidates": found}
+        emp = found[0]["name"]
+    if not frappe.has_permission("Employee", "read", emp):
+        raise ToolError("You do not have permission for this employee.")
+    day = getdate(date) if date else getdate(nowdate())
+    allocations = frappe.get_list("Leave Allocation",
+                                  filters={"employee": emp, "docstatus": 1, "from_date": ["<=", day], "to_date": [">=", day]},
+                                  fields=["leave_type", "total_leaves_allocated", "from_date", "to_date"],
+                                  limit_page_length=50)
+    if leave_type:
+        allocations = [a for a in allocations if cstr(leave_type).lower() in cstr(a.leave_type).lower()]
+    try:
+        from hrms.hr.doctype.leave_application.leave_application import get_leave_balance_on
+    except Exception:
+        get_leave_balance_on = None
+    out = []
+    for a in allocations:
+        balance = None
+        if get_leave_balance_on:
+            try:
+                balance = get_leave_balance_on(emp, a.leave_type, day)
+            except Exception:
+                balance = None
+        if balance is None and frappe.db.exists("DocType", "Leave Ledger Entry"):
+            balance = frappe.db.sql(
+                """select sum(leaves) from `tabLeave Ledger Entry` where employee=%s and leave_type=%s
+                   and docstatus=1 and is_expired=0 and from_date<=%s and to_date>=%s""",
+                (emp, a.leave_type, a.to_date, a.from_date))[0][0]
+        out.append({"leave_type": a.leave_type, "allocated": flt(a.total_leaves_allocated),
+                    "balance": flt(balance), "period": f"{a.from_date} to {a.to_date}"})
+    return _jsonable({"employee": emp, "employee_name": frappe.db.get_value("Employee", emp, "employee_name"),
+                      "date": str(day), "leaves": out,
+                      "note": "" if out else "No leave allocation found for this date."})
+
+
 # ---------------- registry ----------------
 
 FUNCTIONS = {
@@ -690,6 +864,8 @@ FUNCTIONS = {
     "run_sql": run_sql,
     "employee_stats": employee_stats,
     "web_lookup": web_lookup,
+    "attendance_summary": attendance_summary,
+    "leave_balance": leave_balance,
 }
 
 _FILTERS_SCHEMA = {
@@ -766,6 +942,23 @@ SCHEMAS = [
          "status": {"type": "string", "description": "Active (default), Left, Inactive or All"},
          "group_by": {"type": "string", "description": "e.g. department, designation, branch, gender"},
          "list_employees": {"type": "boolean", "description": "true to also return the names"}}}},
+    {"name": "attendance_summary",
+     "description": "ONE day's attendance: how many / who are present, absent, late or on leave, with department-wise "
+                    "counts (good for charts). Use it for every 'aaj kitne present / kaun late aya / kaun absent hai / "
+                    "department-wise attendance' question, today or any date.",
+     "parameters": {"type": "object", "properties": {
+         "date": {"type": "string", "description": "YYYY-MM-DD, default today"},
+         "department": {"type": "string"},
+         "branch": {"type": "string"},
+         "show": {"type": "string", "enum": ["present", "absent", "late", "on_leave"],
+                  "description": "also return the list of these employees"}}}},
+    {"name": "leave_balance",
+     "description": "Remaining leave balance of one employee (by ID or name), for all leave types or one.",
+     "parameters": {"type": "object", "properties": {
+         "employee": {"type": "string", "description": "employee ID or name"},
+         "leave_type": {"type": "string"},
+         "date": {"type": "string", "description": "YYYY-MM-DD, default today"}},
+         "required": ["employee"]}},
     {"name": "web_lookup",
      "description": "Look up GENERAL knowledge on Wikipedia: current presidents / prime ministers / office "
                     "holders, countries, cities, famous people, definitions, history. Use it for every "
