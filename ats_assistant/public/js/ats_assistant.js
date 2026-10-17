@@ -116,18 +116,29 @@
 			if (this.button) { this.button.classList.remove("playing"); this.button.innerHTML = ICON.play + " Suno"; }
 			this.button = null;
 		},
-		browser_voice(text, lang) {
-			if (!window.speechSynthesis) return false;
+		browser_voice(text) {
+			if (!window.speechSynthesis || !text) return false;
 			const voices = window.speechSynthesis.getVoices();
-			const urdu = /[؀-ۿ]/.test(text);
 			const pick = (re) => voices.find((v) => re.test(v.lang));
-			const voice = urdu ? (pick(/^ur/i) || pick(/^hi/i)) : (pick(/^en-(IN|PK)/i) || pick(/^en/i));
-			if (urdu && !voice) return false;
-			const u = new SpeechSynthesisUtterance(text);
-			if (voice) { u.voice = voice; u.lang = voice.lang; } else { u.lang = lang || "en-US"; }
+			let voice;
+			if (/[\u0600-\u06FF]/.test(text)) voice = pick(/^ur/i); // Urdu script: only an Urdu voice
+			else if (/[\u0900-\u097F]/.test(text)) voice = pick(/^hi/i); // Devanagari: Hindi voice sounds like Urdu
+			else voice = pick(/^ur/i) || pick(/^hi/i) || pick(/^en-(IN|PK)/i) || pick(/^en/i); // Roman Urdu
+			if (!voice) return false;
+			const u = new SpeechSynthesisUtterance(text.replace(/[*_`#|>]/g, " "));
+			u.voice = voice;
+			u.lang = voice.lang;
+			u.rate = 0.95;
 			u.onend = () => this.stop();
 			window.speechSynthesis.speak(u);
 			return true;
+		},
+		fallback(d, text) {
+			if (!this.warned) {
+				this.warned = true;
+				frappe.show_alert({ message: "Server ki Urdu awaaz band hai, browser ki awaaz use ho rahi hai.", indicator: "orange" }, 6);
+			}
+			return this.browser_voice(d.spoken_hi) || this.browser_voice(d.spoken) || this.browser_voice(text);
 		},
 		play(text, button) {
 			this.stop();
@@ -144,16 +155,14 @@
 					if (d.audio) {
 						this.audio = new Audio(d.audio);
 						this.audio.onended = () => this.stop();
-						this.audio.play().catch(() => {
-							if (!this.browser_voice(d.spoken || text, d.lang)) this.browser_voice(text);
-						});
-					} else if (!this.browser_voice(d.spoken || text, d.lang) && !this.browser_voice(text)) {
+						this.audio.play().catch(() => { if (!this.fallback(d, text)) this.stop(); });
+					} else if (!this.fallback(d, text)) {
 						this.stop();
 						frappe.show_alert({ message: "Is browser mein awaaz ki suhulat nahi hai.", indicator: "orange" });
 					}
 				},
 				error: () => {
-					if (!this.browser_voice(text)) this.stop();
+					if (!this.fallback({}, text)) this.stop();
 				},
 			});
 		},

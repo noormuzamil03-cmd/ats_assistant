@@ -533,6 +533,127 @@ def run_sql(query, limit=50):
                       "note": "" if len(rows) <= limit else f"showing {limit} rows"})
 
 
+# ---------------- employees & general knowledge ----------------
+
+def _resolve_names(doctype, text):
+    """Exact names of Department / Branch / Designation that match what the user said.
+    'IT' -> 'IT - ATS' (whole word), never 'QUALITY' or 'SECURITY'."""
+    text = cstr(text).strip()
+    if not text:
+        return []
+    meta = frappe.get_meta(doctype)
+    label_field = {"Department": "department_name", "Branch": "branch", "Designation": "designation_name"}.get(doctype)
+    fields = ["name"] + ([label_field] if label_field and meta.get_field(label_field) else [])
+    rows = frappe.get_all(doctype, fields=fields, limit_page_length=0)
+    low = text.lower()
+    # drop filler words: "it department", "daily wages branch", "hr wale"
+    low = re.sub(r"\b(department|departments|deptt?|branch|branches|section|designation|wale|wala|walay|ka|ki|ke|"
+                 r"mein|main|ke log|staff|employees?)\b", " ", low)
+    low = re.sub(r"\s+", " ", low).strip() or text.lower()
+
+    def labels(r):
+        out = [cstr(r.name)]
+        if len(fields) > 1 and r.get(fields[1]):
+            out.append(cstr(r.get(fields[1])))
+        out.append(cstr(r.name).split(" - ")[0])  # "IT - ATS" -> "IT"
+        return [x.strip().lower() for x in out if x]
+
+    exact = [r.name for r in rows if low in labels(r)]
+    if exact:
+        return exact
+    word = re.compile(r"(?<![a-z0-9])" + re.escape(low) + r"(?![a-z0-9])")
+    words = [r.name for r in rows if any(word.search(x) for x in labels(r))]
+    if words:
+        return words
+    if len(low) >= 4:
+        return [r.name for r in rows if any(low in x for x in labels(r))]
+    return []
+
+
+def employee_stats(department=None, branch=None, designation=None, status="Active",
+                   group_by=None, list_employees=False):
+    """Exact employee count (and optional list) by department / branch / designation."""
+    if _blocked("Employee") or not frappe.has_permission("Employee", "read"):
+        raise ToolError("You do not have permission to read Employee.")
+    meta = frappe.get_meta("Employee")
+    filters = {}
+    status = cstr(status).strip() or "Active"
+    if status.lower() != "all":
+        filters["status"] = status
+    resolved = {}
+    for field, doctype, value in (("department", "Department", department),
+                                  ("branch", "Branch", branch),
+                                  ("designation", "Designation", designation)):
+        if not value:
+            continue
+        names = _resolve_names(doctype, value)
+        if not names:
+            options = frappe.get_all(doctype, pluck="name", limit_page_length=60)
+            raise ToolError(f"No {doctype} matches '{value}'. Available: {', '.join(options)}")
+        filters[field] = ["in", names]
+        resolved[field] = names
+
+    group_by = cstr(group_by).strip() or None
+    if group_by and (_sensitive(group_by) or not meta.get_field(group_by)):
+        raise ToolError(f"Cannot group by '{group_by}'.")
+    if not group_by and len(resolved.get("department", [])) > 1:
+        group_by = "department"
+    fields = ["name", "employee_name"] + _existing_fields(meta, ["department", "designation", "branch"])
+    if group_by and group_by not in fields:
+        fields.append(group_by)
+    rows = frappe.get_list("Employee", filters=filters, fields=fields,
+                           order_by="employee_name asc", limit_page_length=MAX_SCAN)
+    result = {"status": status, "matched": resolved, "total": len(rows)}
+    if group_by:
+        groups = {}
+        for r in rows:
+            key = cstr(r.get(group_by)) or "(not set)"
+            groups[key] = groups.get(key, 0) + 1
+        result["by_" + group_by] = dict(sorted(groups.items(), key=lambda x: -x[1]))
+    if cint(list_employees):
+        result["employees"] = [{k: r.get(k) for k in fields} for r in rows[:MAX_ROWS]]
+        if len(rows) > MAX_ROWS:
+            result["note"] = f"showing {MAX_ROWS} of {len(rows)} employees"
+    return _jsonable(result)
+
+
+WIKI_API = "https://{lang}.wikipedia.org/w/api.php"
+
+
+def web_lookup(query, lang="en"):
+    """General knowledge from Wikipedia (current office holders, countries, definitions...).
+    Never used for company data."""
+    if frappe.conf.get("ats_ai_disable_web"):
+        raise ToolError("Web lookup is switched off on this site.")
+    import requests
+
+    query = cstr(query).strip()[:200]
+    if len(query) < 2:
+        raise ToolError("Give a search text.")
+    lang = "ur" if cstr(lang).strip().lower() == "ur" else "en"
+    url = WIKI_API.format(lang=lang)
+    headers = {"User-Agent": "ATS-Assistant/1.0 (ERP chat assistant)"}
+    try:
+        found = requests.get(url, params={"action": "query", "list": "search", "srsearch": query,
+                                          "srlimit": 3, "format": "json"}, headers=headers, timeout=12).json()
+        titles = [h["title"] for h in (found.get("query") or {}).get("search", [])][:3]
+        if not titles:
+            return {"results": [], "note": "Nothing found on Wikipedia."}
+        pages = requests.get(url, params={"action": "query", "prop": "extracts|info", "inprop": "url",
+                                          "exintro": 1, "explaintext": 1, "exlimit": 3, "exchars": 1500,
+                                          "titles": "|".join(titles), "redirects": 1, "format": "json"},
+                             headers=headers, timeout=12).json()
+    except Exception as e:
+        raise ToolError(f"Wikipedia could not be reached: {cstr(e)[:150]}")
+    out = []
+    for page in ((pages.get("query") or {}).get("pages") or {}).values():
+        if page.get("extract"):
+            out.append({"title": page.get("title"), "summary": page["extract"][:1500],
+                        "url": page.get("fullurl", "")})
+    return {"source": "Wikipedia", "results": out,
+            "note": "Use these facts (they are newer than your own knowledge) and mention Wikipedia."}
+
+
 # ---------------- registry ----------------
 
 FUNCTIONS = {
@@ -547,6 +668,8 @@ FUNCTIONS = {
     "system_info": system_info,
     "search_records": search_records,
     "run_sql": run_sql,
+    "employee_stats": employee_stats,
+    "web_lookup": web_lookup,
 }
 
 _FILTERS_SCHEMA = {
@@ -612,6 +735,26 @@ SCHEMAS = [
          "doctype": {"type": "string", "description": "optional: only search this DocType"},
          "limit": {"type": "integer"}},
          "required": ["text"]}},
+    {"name": "employee_stats",
+     "description": "EXACT number of employees (Active by default) by department / branch / designation, "
+                    "optionally grouped and with the list of names. Understands short names like 'IT', 'HR', "
+                    "'CEO'. ALWAYS use this for 'kitne employees / kon kon hain' questions.",
+     "parameters": {"type": "object", "properties": {
+         "department": {"type": "string", "description": "e.g. IT, HR, Production"},
+         "branch": {"type": "string"},
+         "designation": {"type": "string", "description": "e.g. CEO, Manager, Helper"},
+         "status": {"type": "string", "description": "Active (default), Left, Inactive or All"},
+         "group_by": {"type": "string", "description": "e.g. department, designation, branch, gender"},
+         "list_employees": {"type": "boolean", "description": "true to also return the names"}}}},
+    {"name": "web_lookup",
+     "description": "Look up GENERAL knowledge on Wikipedia: current presidents / prime ministers / office "
+                    "holders, countries, cities, famous people, definitions, history. Use it for every "
+                    "general question about the world, especially anything 'current' or recent. "
+                    "Never put company / employee data in the query.",
+     "parameters": {"type": "object", "properties": {
+         "query": {"type": "string", "description": "short English search, e.g. 'President of Pakistan'"},
+         "lang": {"type": "string", "enum": ["en", "ur"]}},
+         "required": ["query"]}},
     {"name": "run_sql",
      "description": "Run ONE read-only MariaDB SELECT for questions that need joins, date grouping or "
                     "calculations across tables. Tables are named `tabDocType Name` (with backticks), child "
@@ -626,7 +769,10 @@ SCHEMAS = [
 
 def get_schemas():
     """Tools this user may use (run_sql only for allowed roles)."""
-    return [s for s in SCHEMAS if s["name"] != "run_sql" or _sql_allowed()]
+    out = [s for s in SCHEMAS if s["name"] != "run_sql" or _sql_allowed()]
+    if frappe.conf.get("ats_ai_disable_web"):
+        out = [s for s in out if s["name"] != "web_lookup"]
+    return out
 
 
 def run_tool(name, args):
