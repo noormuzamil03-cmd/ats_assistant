@@ -17,6 +17,7 @@
   "column_break_1",
   "user",
   "send_email",
+  "email_to",
   "next_run",
   "last_run",
   "last_status",
@@ -107,6 +108,13 @@
    "fieldtype": "Check"
   },
   {
+   "fieldname": "email_to",
+   "label": "Email To",
+   "fieldtype": "Small Text",
+   "depends_on": "eval:doc.send_email",
+   "description": "Comma separated. Empty = your own ERP email. Only a System Manager can send to emails outside the ERP users."
+  },
+  {
    "fieldname": "next_run",
    "label": "Next Run",
    "fieldtype": "Datetime",
@@ -123,7 +131,7 @@
    "fieldname": "last_status",
    "label": "Last Status",
    "fieldtype": "Select",
-   "options": "\nSuccess\nError",
+   "options": "\nSuccess\nEmail Failed\nError",
    "read_only": 1
   },
   {
@@ -153,7 +161,7 @@
  ],
  "index_web_pages_for_search": 0,
  "links": [],
- "modified": "2026-10-19 10:00:00.000000",
+ "modified": "2026-10-19 11:00:00.000000",
  "modified_by": "Administrator",
  "module": "ATS Assistant",
  "name": "ATS AI Automation",

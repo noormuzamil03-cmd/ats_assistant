@@ -1,7 +1,7 @@
 """Automations for the ATS Assistant.
 
 A user tells the chat "roz 10 baje aaj ki absent list bhejo" or "kal 3 baje yaad dilana ke meeting hai".
-The chat saves an "ATS AI Automation" record. Every 5 minutes the scheduler runs the ones that are due,
+The chat saves an "ATS AI Automation" record. Every minute the scheduler runs the ones that are due,
 as that user (so the user's own ERP permissions apply), and delivers the answer:
     - into the chat window (popup + red count on the chat button, even if the chat is closed)
     - the ERP bell (Notification Log)
@@ -26,7 +26,10 @@ FREQUENCIES = ["Once", "Daily", "Working Days (Mon-Sat)", "Weekly", "Monthly"]
 
 AUTOMATION_RULE = """
 This question is running AUTOMATICALLY on a schedule (automation "{title}"). Nobody is waiting to reply:
-answer directly with the latest data, never ask anything back, put the main numbers first and keep it short.
+answer directly with the latest data and never ask anything back. The answer is also EMAILED as a report, so:
+start with one clear sentence with the main number(s), then a small markdown table with the useful breakdown
+(e.g. by status, department or date - pick what fits the question, up to 15 rows), then at most one short
+line of what stands out. No greetings, no questions, no "let me know".
 """
 
 
@@ -123,7 +126,7 @@ def describe(doc):
 # ---------------------------------------------------------------- scheduler
 
 def run_due():
-    """Scheduler (every 5 minutes): start the automations that are due."""
+    """Scheduler (every minute): start the automations that are due."""
     if not frappe.db.exists("DocType", DOCTYPE):
         return
     now = now_datetime()
@@ -133,6 +136,7 @@ def run_due():
         nxt = compute_next(doc, now)
         frappe.db.set_value(DOCTYPE, name, {"next_run": nxt, "enabled": 1 if nxt else 0}, update_modified=False)
         frappe.db.commit()  # saved before the run, so it never runs twice
+        _running(doc.user or doc.owner, True)
         frappe.enqueue("ats_assistant.assistant.automation.run_one", queue="long", timeout=900, name=name)
 
 
@@ -145,6 +149,7 @@ def run_one(name, manual=False):
     if not cint(frappe.db.get_value("User", user, "enabled")):
         return
     previous = frappe.session.user
+    _running(user, True)
     frappe.set_user(user)
     answer, error = "", ""
     try:
@@ -174,9 +179,10 @@ def run_one(name, manual=False):
                 answer = cstr(result.get("answer"))
                 if result.get("error"):
                     error = cstr(result.get("error_text") or answer)
-        deliver(doc, user, answer, error)
+        email_ok = deliver(doc, user, answer, error)
         frappe.db.set_value(DOCTYPE, name, {
-            "last_run": now_datetime(), "last_status": "Error" if error else "Success",
+            "last_run": now_datetime(),
+            "last_status": "Error" if error else ("Email Failed" if email_ok is False else "Success"),
             "last_answer": (answer or error)[:60000], "run_count": cint(doc.run_count) + 1,
         }, update_modified=False)
         frappe.db.commit()
@@ -184,7 +190,20 @@ def run_one(name, manual=False):
         frappe.db.rollback()
         frappe.log_error(title=f"ATS Assistant automation {name}", message=frappe.get_traceback())
     finally:
+        _running(user, False)
         frappe.set_user(previous or "Administrator")
+
+
+def _running(user, on):
+    """Tells the chat window that a result is being prepared (so it checks every few seconds)."""
+    try:
+        key = f"ats_ai_running:{user}"
+        if on:
+            frappe.cache().set_value(key, 1, expires_in_sec=900)
+        else:
+            frappe.cache().delete_value(key)
+    except Exception:
+        pass
 
 
 def deliver(doc, user, answer, error=""):
@@ -194,6 +213,11 @@ def deliver(doc, user, answer, error=""):
     subject = f"{icon} {doc.title}" + (f": {first}" if first and doc.kind != "Reminder" else "")
     if doc.kind == "Reminder":
         subject = f"{icon} Reminder: {first or doc.title}"
+
+    email_ok, email_note = None, ""
+    if cint(doc.send_email):
+        email_ok, email_note = _send_email(doc, user, subject, text)
+        text = text + "\n\n_" + email_note + "_"
 
     log = frappe.get_doc({
         "doctype": "Notification Log", "subject": subject[:140], "for_user": user, "type": "Alert",
@@ -206,16 +230,139 @@ def deliver(doc, user, answer, error=""):
         "id": log.name, "title": doc.title, "kind": doc.kind, "answer": text, "error": 1 if error else 0,
     }, user=user, after_commit=True)
 
-    if cint(doc.send_email):
-        email = frappe.db.get_value("User", user, "email")
-        if email:
-            try:
-                html = frappe.utils.md_to_html(text) if hasattr(frappe.utils, "md_to_html") else f"<pre>{text}</pre>"
-                frappe.sendmail(recipients=[email], subject=subject[:140],
-                                message=html + "<p style='color:#888;font-size:12px'>Sent by ATS Assistant automation "
-                                f"&ldquo;{frappe.utils.escape_html(doc.title)}&rdquo; ({describe(doc)}).</p>")
-            except Exception:
-                frappe.log_error(title="ATS Assistant automation email", message=frappe.get_traceback())
+    return email_ok
+
+
+# ---------------------------------------------------------------- email
+
+def email_ready():
+    """Is an outgoing Email Account set up in the ERP?"""
+    return bool(frappe.db.exists("Email Account", {"enable_outgoing": 1}))
+
+
+def recipients(email_to, user):
+    """Addresses to send to: email_to (comma separated) or the user's own ERP email."""
+    out = []
+    for part in re.split(r"[,;\s]+", cstr(email_to)):
+        part = part.strip()
+        if part:
+            valid = frappe.utils.validate_email_address(part)
+            if not valid:
+                raise ValueError(f"'{part}' is not a valid email address")
+            out.append(valid.lower())
+    if not out:
+        own = frappe.db.get_value("User", user, "email")
+        if own:
+            out.append(own.lower())
+    return list(dict.fromkeys(out))[:10]
+
+
+def check_recipients(emails, user):
+    """Normal users may email only themselves or other ERP users; System Manager may email anyone."""
+    if "System Manager" in frappe.get_roles(user):
+        return
+    own = cstr(frappe.db.get_value("User", user, "email")).lower()
+    for e in emails:
+        if e != own and not frappe.db.exists("User", {"email": e, "enabled": 1}):
+            raise ValueError(f"{e} is not an ERP user. Only a System Manager can send to outside emails.")
+
+
+def email_html(doc, text):
+    """A clean report-style email (inline styles, works in Gmail / Outlook)."""
+    esc = frappe.utils.escape_html
+    body = frappe.utils.md_to_html(text) if hasattr(frappe.utils, "md_to_html") else f"<pre>{esc(text)}</pre>"
+    body = cstr(body)
+    body = re.sub(r"<table[^>]*>", '<table cellpadding="0" cellspacing="0" style="border-collapse:collapse;'
+                  'width:100%;margin:12px 0;font-size:13px">', body)
+    body = re.sub(r"<th(\s[^>]*)?>", '<th style="background:#f3f4f6;border:1px solid #d9dce1;padding:7px 10px;'
+                  'text-align:left;font-weight:600">', body)
+    body = re.sub(r"<td(\s[^>]*)?>", '<td style="border:1px solid #e3e5e8;padding:7px 10px">', body)
+    body = re.sub(r"<p>", '<p style="margin:0 0 10px">', body)
+    try:
+        company = (frappe.defaults.get_user_default("Company")
+                   or frappe.db.get_single_value("Global Defaults", "default_company") or "")
+    except Exception:
+        company = ""
+    try:
+        link = frappe.utils.get_url(f"/app/ats-ai-automation/{doc.name}")
+    except Exception:
+        link = ""
+    when = now_datetime().strftime("%d %b %Y, %I:%M %p")
+    is_reminder = doc.kind == "Reminder"
+    heading = "Reminder" if is_reminder else esc(cstr(doc.title))
+    question = "" if is_reminder else (
+        '<div style="font-size:12px;color:#6b7280;margin:0 0 14px">Question: '
+        f'<i>{esc(cstr(doc.question))}</i></div>')
+    button = (f'<a href="{link}" style="display:inline-block;background:#d23a2e;color:#fff;text-decoration:none;'
+              'padding:8px 16px;border-radius:6px;font-size:13px">Open in ERP</a>') if link else ""
+    return f"""<div style="background:#f3f4f6;padding:24px 12px;font-family:Arial,Helvetica,sans-serif;color:#1f272e">
+<div style="max-width:640px;margin:0 auto;background:#fff;border-radius:10px;overflow:hidden;border:1px solid #e3e5e8">
+<div style="background:#d23a2e;color:#fff;padding:16px 22px">
+<div style="font-size:12px;opacity:.85">{esc(company) or 'ATS'} &middot; ATS Assistant</div>
+<div style="font-size:19px;font-weight:bold;margin-top:2px">{'&#9200; ' if is_reminder else '&#128202; '}{heading}</div>
+</div>
+<div style="padding:20px 22px;font-size:14px;line-height:1.55">
+{question}{body}
+<div style="margin-top:18px">{button}</div>
+</div>
+<div style="padding:12px 22px;background:#fafafa;border-top:1px solid #eee;font-size:11px;color:#888">
+Sent automatically on {when} &middot; {esc(describe(doc))}.<br>
+To stop it, tell the ATS Assistant "is automation ko band karo" or open My Automations in the ERP.
+</div></div></div>"""
+
+
+def _send_email(doc, user, subject, text):
+    try:
+        to = recipients(doc.get("email_to"), user)
+    except ValueError as e:
+        return False, f"Email not sent: {e}"
+    if not to:
+        return False, "Email not sent: no email address."
+    if not email_ready():
+        return False, "Email not sent: no outgoing Email Account is set up in the ERP."
+    try:
+        queued = frappe.sendmail(recipients=to, subject=subject[:140], now=True, message=email_html(doc, text))
+        # check what really happened (Email Queue status)
+        qname = getattr(queued, "name", None) if queued else None
+        status = frappe.db.get_value("Email Queue", qname, ["status", "error"], as_dict=True) if qname else None
+        if status and status.status in ("Error", "Expired"):
+            return False, f"Email to {', '.join(to)} failed: {cstr(status.error).strip().splitlines()[-1][:150] if status.error else status.status}"
+        if status and status.status != "Sent":
+            return True, f"Email to {', '.join(to)} is in the mail queue (it arrives in 1-2 minutes)"
+        return True, "Email sent to " + ", ".join(to)
+    except Exception as e:
+        frappe.log_error(title="ATS Assistant automation email", message=frappe.get_traceback())
+        return False, f"Email to {', '.join(to)} failed: {cstr(e)[:150]}"
+
+
+# ---------------------------------------------------------------- health check
+
+RUN_DUE = "ats_assistant.assistant.automation.run_due"
+
+
+def scheduler_problem():
+    """Plain reason why automations will not run on time, or '' if all looks fine."""
+    try:
+        from frappe.utils.scheduler import is_scheduler_inactive
+
+        if is_scheduler_inactive():
+            return ("The ERP scheduler is OFF, so automations do not run by themselves (only 'run now' works). "
+                    "An admin must run: bench --site SITE enable-scheduler")
+    except Exception:
+        pass
+    try:
+        job = frappe.db.get_value("Scheduled Job Type", {"method": RUN_DUE}, ["last_execution", "stopped"], as_dict=True)
+    except Exception:
+        return ""
+    if not job:
+        return ("The automation timer is not registered yet. An admin must run: bench --site SITE migrate, "
+                "then restart the ERP (bench start / supervisorctl restart all).")
+    if cint(job.stopped):
+        return "The automation timer is stopped in Scheduled Job Type. An admin must untick 'Stopped'."
+    if not job.last_execution or get_datetime(job.last_execution) < now_datetime() - timedelta(minutes=5):
+        return ("The automation timer has not run in the last 5 minutes: the ERP scheduler / workers are not "
+                "running. An admin must check: bench --site SITE scheduler status, and restart the ERP.")
+    return ""
 
 
 # ---------------------------------------------------------------- chat tool
@@ -225,7 +372,7 @@ def _own(name_or_title):
     user = frappe.session.user
     key = cstr(name_or_title).strip()
     fields = ["name", "title", "kind", "frequency", "run_time", "run_date", "weekday", "day_of_month",
-              "enabled", "next_run", "last_run", "last_status", "question"]
+              "enabled", "next_run", "last_run", "last_status", "question", "send_email", "email_to"]
     rows = frappe.get_all(DOCTYPE, filters={"user": user}, fields=fields, order_by="creation asc")
     if not key:
         return rows
@@ -236,12 +383,14 @@ def _own(name_or_title):
 def _row(r):
     return {"id": r.name, "title": r.title, "type": r.kind, "schedule": describe(r),
             "status": "On" if cint(r.enabled) else "Off", "next_run": cstr(r.next_run or "")[:16],
-            "last_run": cstr(r.last_run or "")[:16], "last_status": r.last_status or "",
+            "last_run": cstr(r.last_run or "")[:16] or "never ran yet", "last_status": r.last_status or "",
+            "email": (", ".join(recipients(r.get("email_to"), r.get("user") or frappe.session.user))
+                      if cint(r.get("send_email")) else "no"),
             "question": cstr(r.question)[:200]}
 
 
 def manage_automation(action, title=None, question=None, kind="Question", frequency="Daily", time=None,
-                      weekday=None, day_of_month=None, date=None, send_email=False, automation=None):
+                      weekday=None, day_of_month=None, date=None, send_email=False, automation=None, email_to=None):
     from ats_assistant.assistant.tools import ToolError
 
     if not frappe.db.exists("DocType", DOCTYPE):
@@ -250,8 +399,14 @@ def manage_automation(action, title=None, question=None, kind="Question", freque
 
     if action == "list":
         rows = [_row(r) for r in _own(None)]
-        return {"automations": rows, "count": len(rows),
-                "note": "" if rows else "No automations yet.", "manage_link": "/app/ats-ai-automation"}
+        out = {"automations": rows, "count": len(rows), "now": cstr(now_datetime())[:16],
+               "note": "" if rows else "No automations yet.", "manage_link": "/app/ats-ai-automation"}
+        problem = scheduler_problem()
+        if problem:
+            out["scheduler_warning"] = problem
+        if not email_ready():
+            out["email_warning"] = "No outgoing Email Account is set up in the ERP, so no email can be sent."
+        return out
 
     if action == "create":
         question = cstr(question).strip()
@@ -273,14 +428,30 @@ def manage_automation(action, title=None, question=None, kind="Question", freque
             "weekday": next((w for w in WEEKDAYS if cstr(weekday).lower()[:3] == w.lower()[:3]), "Monday")
             if freq == "Weekly" else None,
             "day_of_month": min(max(cint(day_of_month) or 1, 1), 31) if freq == "Monthly" else 0,
-            "question": question[:2000], "send_email": 1 if (send_email in (True, 1, "1", "true", "yes")) else 0,
+            "question": question[:2000],
+            "send_email": 1 if (email_to or send_email in (True, 1, "1", "true", "yes")) else 0,
+            "email_to": cstr(email_to).strip()[:500],
             "user": frappe.session.user,
         })
         if not compute_next(doc):
             raise ToolError("That time is already over. Give a future date / time.")
+        if doc.send_email:
+            try:
+                check_recipients(recipients(doc.email_to, frappe.session.user), frappe.session.user)
+            except ValueError as e:
+                raise ToolError(str(e))
         doc.insert(ignore_permissions=True)
-        return {"created": _row(doc), "delivery": "chat popup + ERP bell" + (" + email" if doc.send_email else ""),
-                "link": f"/app/ats-ai-automation/{doc.name}"}
+        out = {"created": _row(doc), "delivery": "chat popup + ERP bell" + (" + email" if doc.send_email else ""),
+               "link": f"/app/ats-ai-automation/{doc.name}",
+               "checks_every": "1 minute (it can arrive up to 1 minute after the set time)"}
+        problem = scheduler_problem()
+        if problem:
+            out["scheduler_warning"] = problem
+        if doc.send_email and not email_ready():
+            out["email_warning"] = ("No outgoing Email Account is set up in the ERP, so the email will NOT be sent "
+                                    "until an admin sets one up (Email Account with 'Enable Outgoing'). "
+                                    "The chat popup and bell still work.")
+        return out
 
     if action in ("delete", "pause", "resume", "run_now"):
         found = _own(automation or title)
@@ -314,7 +485,7 @@ def get_inbox():
 
     _allowed()
     if not frappe.db.exists("DocType", DOCTYPE):
-        return []
+        return {"items": []}
     rows = frappe.get_all("Notification Log",
                           filters={"for_user": frappe.session.user, "document_type": DOCTYPE, "read": 0},
                           fields=["name", "subject", "email_content", "document_name", "creation"],
@@ -327,7 +498,12 @@ def get_inbox():
         t = titles[r.document_name]
         out.append({"id": r.name, "title": t.get("title") or r.subject, "kind": t.get("kind") or "Question",
                     "answer": cstr(r.email_content), "time": cstr(r.creation)[:16]})
-    return out
+    # when the next automation of this user is due, so the chat checks right then (no refresh needed)
+    nxt = (frappe.get_all(DOCTYPE, filters={"user": frappe.session.user, "enabled": 1, "next_run": ["is", "set"]},
+                          pluck="next_run", order_by="next_run asc", limit_page_length=1) or [None])[0]
+    next_in = int((get_datetime(nxt) - now_datetime()).total_seconds()) if nxt else None
+    running = bool(frappe.cache().get_value(f"ats_ai_running:{frappe.session.user}"))
+    return {"items": out, "next_in": next_in, "running": running}
 
 
 @frappe.whitelist()

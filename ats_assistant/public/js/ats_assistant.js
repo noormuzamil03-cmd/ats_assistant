@@ -575,8 +575,16 @@
 			frappe.call({ method: "ats_assistant.assistant.automation.mark_read",
 				args: { ids: JSON.stringify(items.map((d) => d.id)) }, freeze: false });
 		}
-		function add_to_inbox(list) {
+		function add_to_inbox(list, silent) {
 			const known = new Set(inbox.map((d) => d.id));
+			const fresh = (list || []).filter((d) => d && d.id && !known.has(d.id) && !seen.has(d.id));
+			if (!silent && fresh.length && !panel.classList.contains("open")) {
+				const d = fresh[fresh.length - 1];
+				const label = (d.kind === "Reminder" ? "⏰ Reminder" : "📊 " + esc(d.title || "Automation")) +
+					(fresh.length > 1 ? " (+" + (fresh.length - 1) + " more)" : "") + " is ready in the assistant";
+				const a = frappe.show_alert({ message: label, indicator: d.error ? "red" : "blue" }, 10);
+				if (a && a.on) a.css("cursor", "pointer").on("click", () => fab.click());
+			}
 			(list || []).forEach((d) => {
 				if (d && d.id && !known.has(d.id) && !seen.has(d.id)) {
 					seen.add(d.id);
@@ -586,23 +594,33 @@
 			paint_badge();
 			flush_inbox();
 		}
+		let next_check = null;
+		function plan_check(ms) {
+			if (next_check) clearTimeout(next_check);
+			next_check = setTimeout(load_inbox, Math.max(3000, ms));
+		}
 		function load_inbox() {
 			frappe.call({ method: "ats_assistant.assistant.automation.get_inbox", freeze: false,
-				callback: (r) => add_to_inbox(r.message || []), error: () => {} });
+				callback: (r) => {
+					const m = r.message || {};
+					add_to_inbox(Array.isArray(m) ? m : m.items || []);
+					if (m.running) plan_check(5000); // a result is being prepared: look again in 5 s
+					else if (m.next_in !== null && m.next_in !== undefined && m.next_in < 3600)
+						plan_check((Math.max(m.next_in, 0) + 15) * 1000); // just after the next automation starts
+					else plan_check(60000);
+				},
+				error: () => plan_check(60000) });
 		}
 		if (frappe.realtime && frappe.realtime.on) {
-			frappe.realtime.on("ats_ai_delivery", (d) => {
-				add_to_inbox([d]);
-				if (!panel.classList.contains("open")) {
-					const label = (d.kind === "Reminder" ? "⏰ Reminder" : "📊 " + esc(d.title || "Automation")) +
-						" is ready in the assistant";
-					const a = frappe.show_alert({ message: label, indicator: d.error ? "red" : "blue" }, 10);
-					if (a && a.on) a.css("cursor", "pointer").on("click", () => fab.click());
-				}
-			});
+			frappe.realtime.on("ats_ai_delivery", (d) => add_to_inbox([d]));
 		}
 		paint_badge();
 		load_inbox();
+		// live (socket.io) notifications may not reach the browser: load_inbox() plans its own next check
+		// (5 s while a result is being prepared, right after the next automation is due, else every minute)
+		document.addEventListener("visibilitychange", () => {
+			if (!document.hidden) load_inbox();
+		});
 		let busy = false;
 		let current = {};
 		// live status from the server ("Checking attendance…", "Running the report…")
@@ -753,6 +771,7 @@
 						chart: /chart|graph|wise|compar|bar\b|pie/i.test(q),
 						datasets: datasets,
 					});
+					if (/automation|reminder|yaad|schedule|baad|baje|roz|daily|har /i.test(q)) load_inbox();
 					if ((auto_voice || via_voice) && !d.error) {
 						Speaker.play(ans, msg.querySelector(".ats-ai-play"));
 					}

@@ -18,4 +18,11 @@ class ATSAIAutomation(Document):
             self.day_of_month = min(max(cint(self.day_of_month) or 1, 1), 31)
         if self.frequency == "Weekly" and not self.weekday:
             self.weekday = "Monday"
+        if cint(self.send_email):
+            try:
+                emails = automation.recipients(self.email_to, self.user)
+                automation.check_recipients(emails, frappe.session.user)
+            except ValueError as e:
+                frappe.throw(str(e))
+            self.email_to = ", ".join(e for e in emails) if self.email_to else ""
         self.next_run = automation.compute_next(self) if cint(self.enabled) else None

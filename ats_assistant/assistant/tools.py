@@ -1164,13 +1164,17 @@ SCHEMAS = [
          "title": {"type": "string", "description": "short name, e.g. 'Daily absent list'"},
          "question": {"type": "string", "description": "self-contained question to ask each time (relative dates "
                       "like aaj / kal / is mahine, include department or employee ID), or the reminder text"},
-         "kind": {"type": "string", "enum": ["Question", "Reminder"]},
+         "kind": {"type": "string", "enum": ["Question", "Reminder"],
+                  "description": "Question = fetch live ERP data each time (default). Reminder = only send a "
+                                 "fixed message, used just for 'yaad dilana / remind me'"},
          "frequency": {"type": "string", "enum": ["Once", "Daily", "Working Days (Mon-Sat)", "Weekly", "Monthly"]},
          "time": {"type": "string", "description": "HH:MM 24-hour, e.g. 10:00 or 15:30"},
          "weekday": {"type": "string", "description": "for Weekly, e.g. Monday"},
          "day_of_month": {"type": "integer", "description": "for Monthly, 1-31"},
          "date": {"type": "string", "description": "YYYY-MM-DD for Once"},
          "send_email": {"type": "boolean", "description": "true only if the user asks for email"},
+         "email_to": {"type": "string", "description": "email address(es) the user gave, comma separated "
+                      "(empty = the user's own ERP email)"},
          "automation": {"type": "string", "description": "id or title of an existing automation "
                         "(for pause / resume / delete / run_now)"}},
          "required": ["action"]}},
