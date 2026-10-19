@@ -508,7 +508,7 @@
 		panel.id = "ats-ai-panel";
 		panel.innerHTML =
 			'<div class="ats-ai-head"><div><b>ATS Assistant</b><span>ERP data, reports &amp; HR</span></div>' +
-			'<div><button class="ats-ai-max" title="Bigger window">⤢</button><button class="ats-ai-voice" title="Read answers aloud (on/off)"></button>' +
+			'<div><button class="ats-ai-auto" title="My automations">⏰</button><button class="ats-ai-max" title="Bigger window">⤢</button><button class="ats-ai-voice" title="Read answers aloud (on/off)"></button>' +
 			'<button class="ats-ai-clear" title="Clear chat">Clear</button><button class="ats-ai-close" title="Close">&times;</button></div></div>' +
 			'<div class="ats-ai-body"></div>' +
 			'<div class="ats-ai-ctx" title="The assistant knows this page: ask e.g. &quot;iski attendance&quot;"><span></span>' +
@@ -545,6 +545,64 @@
 		if (frappe.router && frappe.router.on) frappe.router.on("change", repaint_ctx);
 		$(document).on("form-refresh", repaint_ctx);
 		let chat = load();
+
+		// ---------------- automation results (scheduled questions / reminders)
+		let inbox = [];
+		const seen = new Set(chat.filter((c) => c.auto_id).map((c) => c.auto_id));
+		const badge = document.createElement("span");
+		badge.className = "ats-ai-badge";
+		fab.appendChild(badge);
+		function paint_badge() {
+			badge.textContent = inbox.length > 9 ? "9+" : String(inbox.length);
+			badge.style.display = inbox.length ? "flex" : "none";
+		}
+		function flush_inbox() {
+			if (!inbox.length || !panel.classList.contains("open")) return;
+			const items = inbox;
+			inbox = [];
+			paint_badge();
+			const welcome = body.querySelector(".ats-ai-welcome");
+			if (welcome) welcome.remove();
+			items.forEach((d) => {
+				const head = (d.kind === "Reminder" ? "⏰ **Reminder**" : "📊 **" + (d.title || "Automation") + "**") +
+					(d.time ? " · " + d.time.slice(11, 16) : "");
+				const content = head + "\n\n" + (d.answer || "");
+				chat.push({ role: "assistant", content: content, auto: 1, auto_id: d.id });
+				bubble("assistant", content, "automation");
+			});
+			save(chat);
+			body.scrollTop = body.scrollHeight;
+			frappe.call({ method: "ats_assistant.assistant.automation.mark_read",
+				args: { ids: JSON.stringify(items.map((d) => d.id)) }, freeze: false });
+		}
+		function add_to_inbox(list) {
+			const known = new Set(inbox.map((d) => d.id));
+			(list || []).forEach((d) => {
+				if (d && d.id && !known.has(d.id) && !seen.has(d.id)) {
+					seen.add(d.id);
+					inbox.push(d);
+				}
+			});
+			paint_badge();
+			flush_inbox();
+		}
+		function load_inbox() {
+			frappe.call({ method: "ats_assistant.assistant.automation.get_inbox", freeze: false,
+				callback: (r) => add_to_inbox(r.message || []), error: () => {} });
+		}
+		if (frappe.realtime && frappe.realtime.on) {
+			frappe.realtime.on("ats_ai_delivery", (d) => {
+				add_to_inbox([d]);
+				if (!panel.classList.contains("open")) {
+					const label = (d.kind === "Reminder" ? "⏰ Reminder" : "📊 " + esc(d.title || "Automation")) +
+						" is ready in the assistant";
+					const a = frappe.show_alert({ message: label, indicator: d.error ? "red" : "blue" }, 10);
+					if (a && a.on) a.css("cursor", "pointer").on("click", () => fab.click());
+				}
+			});
+		}
+		paint_badge();
+		load_inbox();
 		let busy = false;
 		let current = {};
 		// live status from the server ("Checking attendance…", "Running the report…")
@@ -765,6 +823,10 @@
 		});
 
 		panel.querySelector(".ats-ai-max").addEventListener("click", () => panel.classList.toggle("big"));
+		panel.querySelector(".ats-ai-auto").addEventListener("click", () => {
+			if (frappe.set_route) frappe.set_route("List", "ATS AI Automation");
+			else window.location.href = "/app/ats-ai-automation";
+		});
 
 		voice_btn.addEventListener("click", () => {
 			auto_voice = !auto_voice;
@@ -778,6 +840,8 @@
 			if (panel.classList.contains("open")) {
 				render();
 				paint_ctx();
+				flush_inbox();
+				load_inbox();
 				input.focus();
 			} else {
 				Speaker.stop();
@@ -793,6 +857,7 @@
 			Speaker.stop();
 			chat = [];
 			save(chat);
+			seen.clear();
 			render();
 		});
 		send_btn.addEventListener("click", () => ask());

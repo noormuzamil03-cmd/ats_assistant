@@ -155,3 +155,9 @@
 .ats-ai-ctx span { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .ats-ai-ctx button { border: 0; background: transparent; color: inherit; font-size: 15px; line-height: 1; padding: 0 4px; cursor: pointer; }
 .ats-ai-ctx button:hover { color: #d23a2e; }
+
+/* automation results: red count on the chat button */
+#ats-ai-fab { position: fixed; }
+.ats-ai-badge { position: absolute; top: -3px; right: -3px; min-width: 20px; height: 20px; padding: 0 5px; border-radius: 10px;
+	background: #fff; color: #d23a2e; font-size: 11px; font-weight: 700; display: none; align-items: center; justify-content: center;
+	box-shadow: 0 1px 4px rgba(0, 0, 0, .3); border: 2px solid #d23a2e; }

@@ -1023,6 +1023,13 @@ def missing_checkout(date=None, from_date=None, to_date=None, department=None, b
     return _jsonable(result)
 
 
+def manage_automation(**kwargs):
+    """Scheduled questions / reminders of the current user (see automation.py)."""
+    from ats_assistant.assistant import automation
+
+    return automation.manage_automation(**kwargs)
+
+
 # ---------------- registry ----------------
 
 FUNCTIONS = {
@@ -1042,6 +1049,7 @@ FUNCTIONS = {
     "attendance_summary": attendance_summary,
     "leave_balance": leave_balance,
     "missing_checkout": missing_checkout,
+    "manage_automation": manage_automation,
 }
 
 _FILTERS_SCHEMA = {
@@ -1146,6 +1154,26 @@ SCHEMAS = [
          "department": {"type": "string"},
          "branch": {"type": "string"},
          "employee": {"type": "string", "description": "employee ID or name"}}}},
+    {"name": "manage_automation",
+     "description": "Create, list, pause, resume, delete or run-now the user's AUTOMATIONS: a question the assistant "
+                    "answers by itself on a schedule (\"roz 10 baje absent list bhejo\", \"har somwar overtime\", "
+                    "\"mahine ki 1 tareekh ko...\") or a reminder (\"kal 3 baje yaad dilana ke meeting hai\"). "
+                    "Results arrive in this chat with a popup and in the ERP bell (and email if asked).",
+     "parameters": {"type": "object", "properties": {
+         "action": {"type": "string", "enum": ["create", "list", "pause", "resume", "delete", "run_now"]},
+         "title": {"type": "string", "description": "short name, e.g. 'Daily absent list'"},
+         "question": {"type": "string", "description": "self-contained question to ask each time (relative dates "
+                      "like aaj / kal / is mahine, include department or employee ID), or the reminder text"},
+         "kind": {"type": "string", "enum": ["Question", "Reminder"]},
+         "frequency": {"type": "string", "enum": ["Once", "Daily", "Working Days (Mon-Sat)", "Weekly", "Monthly"]},
+         "time": {"type": "string", "description": "HH:MM 24-hour, e.g. 10:00 or 15:30"},
+         "weekday": {"type": "string", "description": "for Weekly, e.g. Monday"},
+         "day_of_month": {"type": "integer", "description": "for Monthly, 1-31"},
+         "date": {"type": "string", "description": "YYYY-MM-DD for Once"},
+         "send_email": {"type": "boolean", "description": "true only if the user asks for email"},
+         "automation": {"type": "string", "description": "id or title of an existing automation "
+                        "(for pause / resume / delete / run_now)"}},
+         "required": ["action"]}},
     {"name": "web_lookup",
      "description": "Look up GENERAL knowledge on Wikipedia: current presidents / prime ministers / office "
                     "holders, countries, cities, famous people, definitions, history. Use it for every "

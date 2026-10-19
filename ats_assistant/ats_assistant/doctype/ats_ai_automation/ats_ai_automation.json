@@ -1,0 +1,188 @@
+{
+ "actions": [],
+ "allow_rename": 0,
+ "autoname": "hash",
+ "creation": "2026-10-19 10:00:00.000000",
+ "doctype": "DocType",
+ "engine": "InnoDB",
+ "field_order": [
+  "enabled",
+  "title",
+  "kind",
+  "frequency",
+  "run_time",
+  "run_date",
+  "weekday",
+  "day_of_month",
+  "column_break_1",
+  "user",
+  "send_email",
+  "next_run",
+  "last_run",
+  "last_status",
+  "run_count",
+  "section_q",
+  "question",
+  "last_answer"
+ ],
+ "fields": [
+  {
+   "fieldname": "enabled",
+   "label": "Enabled",
+   "fieldtype": "Check",
+   "default": "1",
+   "in_list_view": 1
+  },
+  {
+   "fieldname": "title",
+   "label": "Title",
+   "fieldtype": "Data",
+   "reqd": 1,
+   "in_list_view": 1,
+   "bold": 1
+  },
+  {
+   "fieldname": "kind",
+   "label": "Type",
+   "fieldtype": "Select",
+   "options": "Question\nReminder",
+   "default": "Question",
+   "in_standard_filter": 1,
+   "description": "Question: the assistant answers it with live ERP data. Reminder: the text is just sent to you."
+  },
+  {
+   "fieldname": "frequency",
+   "label": "Repeat",
+   "fieldtype": "Select",
+   "options": "Once\nDaily\nWorking Days (Mon-Sat)\nWeekly\nMonthly",
+   "default": "Daily",
+   "reqd": 1,
+   "in_list_view": 1
+  },
+  {
+   "fieldname": "run_time",
+   "label": "Time",
+   "fieldtype": "Time",
+   "default": "09:00:00",
+   "reqd": 1,
+   "in_list_view": 1
+  },
+  {
+   "fieldname": "run_date",
+   "label": "Date",
+   "fieldtype": "Date",
+   "depends_on": "eval:doc.frequency=='Once'",
+   "mandatory_depends_on": "eval:doc.frequency=='Once'"
+  },
+  {
+   "fieldname": "weekday",
+   "label": "Day of Week",
+   "fieldtype": "Select",
+   "options": "Monday\nTuesday\nWednesday\nThursday\nFriday\nSaturday\nSunday",
+   "depends_on": "eval:doc.frequency=='Weekly'"
+  },
+  {
+   "fieldname": "day_of_month",
+   "label": "Day of Month",
+   "fieldtype": "Int",
+   "depends_on": "eval:doc.frequency=='Monthly'",
+   "description": "1-31 (31 = last day in shorter months)"
+  },
+  {
+   "fieldname": "column_break_1",
+   "label": "",
+   "fieldtype": "Column Break"
+  },
+  {
+   "fieldname": "user",
+   "label": "Run As / Send To",
+   "fieldtype": "Link",
+   "options": "User",
+   "in_standard_filter": 1,
+   "description": "The answer uses this user's ERP permissions and is delivered to this user."
+  },
+  {
+   "fieldname": "send_email",
+   "label": "Also send by email",
+   "fieldtype": "Check"
+  },
+  {
+   "fieldname": "next_run",
+   "label": "Next Run",
+   "fieldtype": "Datetime",
+   "read_only": 1,
+   "in_list_view": 1
+  },
+  {
+   "fieldname": "last_run",
+   "label": "Last Run",
+   "fieldtype": "Datetime",
+   "read_only": 1
+  },
+  {
+   "fieldname": "last_status",
+   "label": "Last Status",
+   "fieldtype": "Select",
+   "options": "\nSuccess\nError",
+   "read_only": 1
+  },
+  {
+   "fieldname": "run_count",
+   "label": "Times Run",
+   "fieldtype": "Int",
+   "read_only": 1
+  },
+  {
+   "fieldname": "section_q",
+   "label": "Question",
+   "fieldtype": "Section Break"
+  },
+  {
+   "fieldname": "question",
+   "label": "Question / Reminder Text",
+   "fieldtype": "Small Text",
+   "reqd": 1,
+   "description": "Asked to the assistant every time, e.g. \"aaj kitne log absent hain, department-wise\""
+  },
+  {
+   "fieldname": "last_answer",
+   "label": "Last Answer",
+   "fieldtype": "Long Text",
+   "read_only": 1
+  }
+ ],
+ "index_web_pages_for_search": 0,
+ "links": [],
+ "modified": "2026-10-19 10:00:00.000000",
+ "modified_by": "Administrator",
+ "module": "ATS Assistant",
+ "name": "ATS AI Automation",
+ "owner": "Administrator",
+ "permissions": [
+  {
+   "role": "System Manager",
+   "read": 1,
+   "write": 1,
+   "create": 1,
+   "delete": 1,
+   "report": 1,
+   "export": 1
+  },
+  {
+   "role": "AI Assistant User",
+   "read": 1,
+   "write": 1,
+   "create": 1,
+   "delete": 1,
+   "report": 1,
+   "if_owner": 1
+  }
+ ],
+ "sort_field": "modified",
+ "sort_order": "DESC",
+ "states": [],
+ "title_field": "title",
+ "show_title_field_in_link": 0,
+ "track_changes": 1,
+ "naming_rule": "Random"
+}

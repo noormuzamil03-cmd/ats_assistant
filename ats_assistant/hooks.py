@@ -317,3 +317,11 @@ after_migrate = ["ats_assistant.assistant.setup.ensure_role"]
 scheduler_events = {
     "daily": ["ats_assistant.assistant.audit.clear_old_logs"],
 }
+
+# ATS Assistant automations: run due scheduled questions / reminders every 5 minutes
+try:
+    scheduler_events
+except NameError:
+    scheduler_events = {}
+scheduler_events.setdefault("cron", {}).setdefault("*/5 * * * *", []).append(
+    "ats_assistant.assistant.automation.run_due")

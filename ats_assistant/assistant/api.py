@@ -56,6 +56,14 @@ Company terms (always use these, they override general ERPNext meaning):
   field workflow_state ("Pending Approval", "Rework Required", "Approved").
 - Attendance of a day ("present today", "aaj kon aya", "kaun late aya", "kaun absent hai", "department-wise
   attendance", any date) = attendance_summary tool. Leave balance of an employee = leave_balance tool.
+- Automations and reminders: when the user wants something done regularly or later ("roz 10 baje absent list
+  bhejo", "har somwar overtime report", "mahine ki 1 tareekh ko...", "kal 3 baje yaad dilana", "every day at 9")
+  use manage_automation. Write the question so it works alone every time: relative words (aaj, kal, is hafte,
+  is mahine) instead of fixed dates, include the department / employee ID from the page or chat, and keep the
+  user's language. A reminder (only a message, no data) is kind=Reminder. "meri automations / schedules" =
+  action list; "band karo / delete / dobara chalu / abhi chalao" = pause / delete / resume / run_now.
+  After creating, say in one line when it runs and that the result comes in this chat with a popup and the
+  bell icon (and email if asked). Do not create one unless the user asked for a repeat or a later time.
 - "missing checkout", "checkout nahi kiya", "punch out missing", "sirf in punch", "out punch nahi" =
   missing_checkout tool (one day or a date range, e.g. "is hafte", "is mahine" -> from_date / to_date).
 - Only use the manufacturing "Work Order" DocType if the user clearly says production / manufacturing.
@@ -254,6 +262,7 @@ TOOL_LABELS = {
     "search_records": "Searching records", "employee_stats": "Counting employees",
     "attendance_summary": "Checking attendance", "leave_balance": "Checking leave balance",
     "missing_checkout": "Checking missing check-outs",
+    "manage_automation": "Setting up the automation",
     "query_records": "Reading records", "aggregate": "Calculating totals", "get_document": "Opening the record",
     "list_reports": "Looking for a report", "describe_report": "Reading report filters", "run_report": "Running the report",
     "run_sql": "Querying the database", "web_lookup": "Searching Wikipedia", "list_doctypes": "Looking up tables",
